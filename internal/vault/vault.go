@@ -22,7 +22,7 @@ const (
 var (
 	aadDEK     = []byte("envctl:v1:dek")
 	aadPayload = []byte("envctl:v1:payload")
-	keyNameRe  = regexp.MustCompile(`^[A-Za-z0-9_./-]{1,128}$`)
+	keyNameRe  = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_./-]{0,127}$`)
 
 	ErrVaultExists     = errors.New("vault already exists")
 	ErrVaultNotFound   = errors.New("vault not found")

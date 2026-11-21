@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-var placeholderRe = regexp.MustCompile(`%ENVCTL-([A-Za-z0-9_./-]+)%`)
+var placeholderRe = regexp.MustCompile(`%ENVCTL-([A-Za-z0-9_][A-Za-z0-9_./-]*)%`)
 
 type Parsed struct {
 	Values map[string]string

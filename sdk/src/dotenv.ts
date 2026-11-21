@@ -1,4 +1,4 @@
-const PLACEHOLDER_RE = /%ENVCTL-([A-Za-z0-9_./-]+)%/g;
+const PLACEHOLDER_RE = /%ENVCTL-([A-Za-z0-9_][A-Za-z0-9_./-]*)%/g;
 
 export interface ParsedDotenv {
   values: Record<string, string>;

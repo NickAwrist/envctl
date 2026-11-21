@@ -38,7 +38,10 @@ export interface ResolveEnvOptions extends ClientOptions {
   override?: boolean;
   /** Existing environment used for precedence checks. Defaults to process.env. */
   baseEnv?: Readonly<Record<string, string | undefined>>;
-  /** Do not throw if the .env file does not exist. Defaults to false. */
+  /**
+   * Do not throw if the .env file does not exist.
+   * Defaults to true when `path` is omitted, false when `path` is explicit.
+   */
   optional?: boolean;
 }
 
@@ -52,9 +55,9 @@ function isEnoent(err: unknown): boolean {
 }
 
 /**
- * Reads a .env file, resolves all %ENVCTL-...% placeholders via the running
- * envctl daemon in a single batch call, and returns the resolved variables
- * without mutating process.env.
+ * Reads a .env file (if present) and scans baseEnv for %ENVCTL-...% placeholders,
+ * resolves all referenced secrets via the running envctl daemon in a single batch
+ * call, and returns the resolved variables without mutating process.env.
  */
 export async function resolveEnv(
   options: ResolveEnvOptions = {},
@@ -62,19 +65,19 @@ export async function resolveEnv(
   const envPath = resolve(options.path ?? ".env");
   const override = options.override ?? false;
   const baseEnv = options.baseEnv ?? process.env;
+  const optional = options.optional ?? options.path === undefined;
 
-  let content: string;
+  let parsed: ParsedDotenv = { values: {}, order: [] };
   try {
-    content = await readFile(envPath, "utf8");
+    const content = await readFile(envPath, "utf8");
+    parsed = parseDotenv(content);
   } catch (err: unknown) {
-    if (options.optional && isEnoent(err)) {
-      return {};
+    if (!optional || !isEnoent(err)) {
+      throw err;
     }
-    throw err;
   }
 
-  const parsed = parseDotenv(content);
-  const activeKeys: string[] = [];
+  const pending = new Map<string, string>();
   const neededSecrets = new Set<string>();
 
   for (const envKey of parsed.order) {
@@ -85,8 +88,23 @@ export async function resolveEnv(
         continue;
       }
     }
-    activeKeys.push(envKey);
+    pending.set(envKey, val);
     for (const secretName of extractPlaceholders(val)) {
+      neededSecrets.add(secretName);
+    }
+  }
+
+  // Also resolve any %ENVCTL-...% placeholders already injected into process.env
+  // (for example by systemd EnvironmentFile, deployctl, or Docker Compose).
+  for (const [envKey, existing] of Object.entries(baseEnv)) {
+    if (existing === undefined || !hasPlaceholder(existing)) {
+      continue;
+    }
+    if (override && pending.has(envKey)) {
+      continue;
+    }
+    pending.set(envKey, existing);
+    for (const secretName of extractPlaceholders(existing)) {
       neededSecrets.add(secretName);
     }
   }
@@ -102,8 +120,7 @@ export async function resolveEnv(
   }
 
   const resolved: Record<string, string> = {};
-  for (const envKey of activeKeys) {
-    const raw = parsed.values[envKey] ?? "";
+  for (const [envKey, raw] of pending) {
     if (hasPlaceholder(raw)) {
       const { value, missing } = replacePlaceholders(raw, secrets);
       if (missing.length > 0) {

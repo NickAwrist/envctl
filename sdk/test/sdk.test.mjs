@@ -167,6 +167,21 @@ describe("SDK integration against real Go envctl daemon", () => {
     assert.equal(target.PORT, "9999");
   });
 
+  it("resolves placeholders already present in process.env even without a .env file", async () => {
+    const target = {
+      MESSAGE: "Key=%ENVCTL-OPENROUTER_API_KEY%",
+      PLAIN: "untouched",
+    };
+    await loadEnv({
+      path: join(workDir, "nonexistent.env"),
+      optional: true,
+      socketPath: sockPath,
+      target,
+    });
+    assert.equal(target.MESSAGE, "Key=sk-or-from-go-daemon");
+    assert.equal(target.PLAIN, "untouched");
+  });
+
   it("supports CJS require() consumer", async () => {
     const cjs = require("../dist/cjs/index.js");
     const val = await cjs.getSecret("OPENROUTER_API_KEY", { socketPath: sockPath });
