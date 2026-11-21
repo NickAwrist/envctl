@@ -1,0 +1,126 @@
+package cli
+
+import (
+	"errors"
+	"fmt"
+
+	"github.com/NickAwrist/envctl/internal/output"
+)
+
+const Version = "0.1.0"
+
+// ExitCodeError signals that a child command exited with a specific code.
+type ExitCodeError struct {
+	Code int
+}
+
+func (e *ExitCodeError) Error() string {
+	return fmt.Sprintf("exit status %d", e.Code)
+}
+
+// App wires together CLI subcommands and centralized output formatting.
+type App struct {
+	out *output.Printer
+}
+
+func NewApp(out *output.Printer) *App {
+	return &App{out: out}
+}
+
+// Run executes the CLI with the provided arguments and returns the process exit code.
+func Run(args []string) int {
+	app := NewApp(output.New())
+	if err := app.Execute(args); err != nil {
+		var exitErr *ExitCodeError
+		if errors.As(err, &exitErr) {
+			return exitErr.Code
+		}
+		app.out.Error("%v", err)
+		return 1
+	}
+	return 0
+}
+
+func (a *App) Execute(args []string) error {
+	if len(args) == 0 {
+		a.printUsage()
+		return nil
+	}
+
+	cmd, rest := args[0], args[1:]
+	switch cmd {
+	case "init":
+		return a.cmdInit(rest)
+	case "unlock":
+		return a.cmdUnlock(rest)
+	case "lock":
+		return a.cmdLock(rest)
+	case "status":
+		return a.cmdStatus(rest)
+	case "set":
+		return a.cmdSet(rest)
+	case "get":
+		return a.cmdGet(rest)
+	case "list", "ls":
+		return a.cmdList(rest)
+	case "rm", "delete":
+		return a.cmdDelete(rest)
+	case "check":
+		return a.cmdCheck(rest)
+	case "run":
+		return a.cmdRun(rest)
+	case "config":
+		return a.cmdConfig(rest)
+	case "passwd":
+		return a.cmdPasswd(rest)
+	case "__daemon":
+		return a.cmdDaemon(rest)
+	case "version", "--version", "-v":
+		a.out.Info("envctl %s", a.out.Dim(Version))
+		return nil
+	case "help", "--help", "-h":
+		a.printUsage()
+		return nil
+	default:
+		a.printUsage()
+		return fmt.Errorf("unknown command %q", cmd)
+	}
+}
+
+func (a *App) printUsage() {
+	a.out.Info("%s %s", a.out.Bold("envctl"), a.out.Dim("encrypted local environment variable manager"))
+	a.out.Line("")
+	a.out.Section("Usage")
+	a.out.Info("  envctl <command> [flags]")
+	a.out.Line("")
+	a.out.Section("Commands")
+	commands := [][2]string{
+		{"init", "Initialize a new encrypted vault and default config"},
+		{"unlock", "Unlock the vault (--ttl <dur> | --session | --until-lock)"},
+		{"lock", "Lock the vault and stop the daemon"},
+		{"status", "Show daemon lock status and configuration"},
+		{"set", "Store or update a secret"},
+		{"get", "Print a single secret value"},
+		{"list", "List stored secret keys (never prints values)"},
+		{"rm", "Delete a secret"},
+		{"check", "Verify all %ENVCTL-...% references in a .env file exist"},
+		{"run", "Resolve a .env file in memory and run a command"},
+		{"config", "View or update settings (unlock_mode, unlock_ttl)"},
+		{"passwd", "Change the master password"},
+		{"version", "Print version"},
+	}
+	for _, c := range commands {
+		a.out.Info("  %s%s  %s", a.out.Cyan(c[0]), padSpaces(9-len(c[0])), c[1])
+	}
+}
+
+func padSpaces(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = ' '
+	}
+	return string(b)
+}

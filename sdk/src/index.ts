@@ -1,0 +1,173 @@
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { fetchSecrets, fetchStatus, type ClientOptions } from "./client.js";
+import {
+  extractPlaceholders,
+  hasPlaceholder,
+  parseDotenv,
+  replacePlaceholders,
+  type ParsedDotenv,
+} from "./dotenv.js";
+import {
+  EnvctlError,
+  EnvctlLockedError,
+  EnvctlMissingKeysError,
+  EnvctlProtocolError,
+  type EnvctlErrorCode,
+} from "./errors.js";
+import { resolveSocketPath } from "./paths.js";
+import type { DaemonStatus, UnlockMode } from "./protocol.js";
+
+export {
+  EnvctlError,
+  EnvctlLockedError,
+  EnvctlMissingKeysError,
+  EnvctlProtocolError,
+  extractPlaceholders,
+  hasPlaceholder,
+  parseDotenv,
+  replacePlaceholders,
+  resolveSocketPath,
+};
+export type { ClientOptions, DaemonStatus, EnvctlErrorCode, ParsedDotenv, UnlockMode };
+
+export interface ResolveEnvOptions extends ClientOptions {
+  /** Path to .env file. Defaults to ".env" in process.cwd(). */
+  path?: string;
+  /** Override values already set in process.env. Defaults to false. */
+  override?: boolean;
+  /** Existing environment used for precedence checks. Defaults to process.env. */
+  baseEnv?: Readonly<Record<string, string | undefined>>;
+  /** Do not throw if the .env file does not exist. Defaults to false. */
+  optional?: boolean;
+}
+
+export interface LoadEnvOptions extends ResolveEnvOptions {
+  /** Target object to mutate. Defaults to process.env. */
+  target?: Record<string, string | undefined>;
+}
+
+function isEnoent(err: unknown): boolean {
+  return err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT";
+}
+
+/**
+ * Reads a .env file, resolves all %ENVCTL-...% placeholders via the running
+ * envctl daemon in a single batch call, and returns the resolved variables
+ * without mutating process.env.
+ */
+export async function resolveEnv(
+  options: ResolveEnvOptions = {},
+): Promise<Record<string, string>> {
+  const envPath = resolve(options.path ?? ".env");
+  const override = options.override ?? false;
+  const baseEnv = options.baseEnv ?? process.env;
+
+  let content: string;
+  try {
+    content = await readFile(envPath, "utf8");
+  } catch (err: unknown) {
+    if (options.optional && isEnoent(err)) {
+      return {};
+    }
+    throw err;
+  }
+
+  const parsed = parseDotenv(content);
+  const activeKeys: string[] = [];
+  const neededSecrets = new Set<string>();
+
+  for (const envKey of parsed.order) {
+    const val = parsed.values[envKey] ?? "";
+    if (!override) {
+      const existing = baseEnv[envKey];
+      if (existing !== undefined && !hasPlaceholder(existing)) {
+        continue;
+      }
+    }
+    activeKeys.push(envKey);
+    for (const secretName of extractPlaceholders(val)) {
+      neededSecrets.add(secretName);
+    }
+  }
+
+  let secrets: Record<string, string> = {};
+  if (neededSecrets.size > 0) {
+    const sorted = [...neededSecrets].sort();
+    const res = await fetchSecrets(sorted, options);
+    if (res.missing.length > 0) {
+      throw new EnvctlMissingKeysError(res.missing);
+    }
+    secrets = res.values;
+  }
+
+  const resolved: Record<string, string> = {};
+  for (const envKey of activeKeys) {
+    const raw = parsed.values[envKey] ?? "";
+    if (hasPlaceholder(raw)) {
+      const { value, missing } = replacePlaceholders(raw, secrets);
+      if (missing.length > 0) {
+        throw new EnvctlMissingKeysError(missing);
+      }
+      resolved[envKey] = value;
+    } else {
+      resolved[envKey] = raw;
+    }
+  }
+
+  return resolved;
+}
+
+/**
+ * Reads a .env file, resolves %ENVCTL-...% placeholders via the envctl daemon,
+ * writes the resolved values into process.env (or options.target), and returns
+ * the entries that were set.
+ */
+export async function loadEnv(
+  options: LoadEnvOptions = {},
+): Promise<Record<string, string>> {
+  const target = options.target ?? process.env;
+  const resolved = await resolveEnv({
+    ...options,
+    baseEnv: options.baseEnv ?? target,
+  });
+  for (const [key, value] of Object.entries(resolved)) {
+    target[key] = value;
+  }
+  return resolved;
+}
+
+/**
+ * Fetches a single secret directly from the running envctl daemon.
+ */
+export async function getSecret(
+  key: string,
+  options: ClientOptions = {},
+): Promise<string> {
+  const res = await fetchSecrets([key], options);
+  if (res.missing.length > 0 || !Object.prototype.hasOwnProperty.call(res.values, key)) {
+    throw new EnvctlMissingKeysError([key]);
+  }
+  return res.values[key] ?? "";
+}
+
+/**
+ * Fetches multiple secrets in a single daemon request.
+ */
+export async function getSecrets(
+  keys: readonly string[],
+  options: ClientOptions = {},
+): Promise<Record<string, string>> {
+  const res = await fetchSecrets(keys, options);
+  if (res.missing.length > 0) {
+    throw new EnvctlMissingKeysError(res.missing);
+  }
+  return res.values;
+}
+
+/**
+ * Checks whether the local envctl daemon is unlocked and returns its metadata.
+ */
+export async function getStatus(options: ClientOptions = {}): Promise<DaemonStatus> {
+  return fetchStatus(options);
+}

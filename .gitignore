@@ -1,0 +1,13 @@
+# Build outputs
+/bin/
+/envctl
+sdk/dist/
+sdk/node_modules/
+
+# Local env files
+.env
+.env.local
+
+# OS / editor
+.DS_Store
+*.swp
