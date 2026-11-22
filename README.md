@@ -1,3 +1,5 @@
+<img src="assets/icon.svg" width="56" height="56" alt="envctl" />
+
 # envctl
 
 Local encrypted environment variable manager for reusing secrets across projects on one machine.
