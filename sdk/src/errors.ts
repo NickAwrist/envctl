@@ -6,6 +6,7 @@ export type EnvctlErrorCode =
   | "VERSION_MISMATCH"
   | "NOT_FOUND"
   | "PROTOCOL_ERROR"
+  | "ENV_FILE"
   | "INTERNAL";
 
 export class EnvctlError extends Error {

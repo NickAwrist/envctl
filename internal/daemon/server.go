@@ -23,6 +23,8 @@ import (
 
 const defaultInitialIdleTimeout = 15 * time.Second
 
+var errSecretNotFound = errors.New("secret not found")
+
 type Server struct {
 	socketPath         string
 	vaultPath          string
@@ -55,12 +57,23 @@ func (s *Server) SetInitialIdleTimeout(d time.Duration) {
 	s.initialIdleTimeout = d
 }
 
-func (s *Server) Start() error {
-	if len(s.socketPath) >= 104 {
-		return fmt.Errorf("socket path %q exceeds unix domain socket length limit (%d >= 104)", s.socketPath, len(s.socketPath))
+// checkSocketPath verifies that a daemon may listen on socketPath, creating its
+// directory if needed. It never replaces a file that is not a socket.
+func checkSocketPath(socketPath string) error {
+	if len(socketPath) >= 104 {
+		return fmt.Errorf("socket path %q exceeds unix domain socket length limit (%d >= 104)", socketPath, len(socketPath))
 	}
-	dir := filepath.Dir(s.socketPath)
-	if err := paths.EnsurePrivateDir(dir); err != nil {
+	if err := paths.EnsurePrivateDir(filepath.Dir(socketPath)); err != nil {
+		return err
+	}
+	if info, err := os.Lstat(socketPath); err == nil && info.Mode()&os.ModeSocket == 0 {
+		return fmt.Errorf("%s exists and is not a unix socket; refusing to replace it", socketPath)
+	}
+	return nil
+}
+
+func (s *Server) Start() error {
+	if err := checkSocketPath(s.socketPath); err != nil {
 		return err
 	}
 
@@ -205,6 +218,12 @@ func (s *Server) dispatch(req protocol.Request) (protocol.Response, bool) {
 		}, false
 	}
 
+	if req.Vault != "" && !s.servesVault(req.Vault) {
+		return errResp(protocol.ErrCodeInvalidRequest, fmt.Sprintf(
+			"the daemon on %s serves vault %s, not %s; use a separate ENVCTL_SOCKET for each vault",
+			s.socketPath, s.vaultPath, req.Vault)), false
+	}
+
 	switch req.Op {
 	case protocol.OpStatus:
 		return s.handleStatus(), false
@@ -228,6 +247,18 @@ func (s *Server) dispatch(req protocol.Request) (protocol.Response, bool) {
 			Error:     fmt.Sprintf("unknown operation %q", req.Op),
 		}, false
 	}
+}
+
+func (s *Server) servesVault(path string) bool {
+	if path == s.vaultPath {
+		return true
+	}
+	want, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	have, err := os.Stat(s.vaultPath)
+	return err == nil && os.SameFile(want, have)
 }
 
 func (s *Server) handleStatus() protocol.Response {
@@ -441,27 +472,24 @@ func (s *Server) handleSet(req protocol.Request) protocol.Response {
 		return errResp(protocol.ErrCodeLocked, "vault is locked; run 'envctl unlock'")
 	}
 
-	payload, err := vault.ReadPayload(s.vaultPath, s.dek)
-	if err != nil {
-		return errResp(protocol.ErrCodeInternal, err.Error())
-	}
-
-	now := time.Now().UTC()
-	entry := vault.Entry{
-		Value:       req.Value,
-		Description: req.Description,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}
-	if prev, exists := payload.Secrets[req.Key]; exists {
-		entry.CreatedAt = prev.CreatedAt
-		if req.Description == "" {
-			entry.Description = prev.Description
+	err := vault.UpdatePayload(s.vaultPath, s.dek, func(payload *vault.Payload) error {
+		now := time.Now().UTC()
+		entry := vault.Entry{
+			Value:       req.Value,
+			Description: req.Description,
+			CreatedAt:   now,
+			UpdatedAt:   now,
 		}
-	}
-	payload.Secrets[req.Key] = entry
-
-	if err := vault.WritePayload(s.vaultPath, s.dek, payload); err != nil {
+		if prev, exists := payload.Secrets[req.Key]; exists {
+			entry.CreatedAt = prev.CreatedAt
+			if req.Description == "" {
+				entry.Description = prev.Description
+			}
+		}
+		payload.Secrets[req.Key] = entry
+		return nil
+	})
+	if err != nil {
 		return errResp(protocol.ErrCodeInternal, err.Error())
 	}
 	return protocol.Response{V: protocol.Version, OK: true}
@@ -479,16 +507,17 @@ func (s *Server) handleDelete(req protocol.Request) protocol.Response {
 		return errResp(protocol.ErrCodeLocked, "vault is locked; run 'envctl unlock'")
 	}
 
-	payload, err := vault.ReadPayload(s.vaultPath, s.dek)
-	if err != nil {
-		return errResp(protocol.ErrCodeInternal, err.Error())
-	}
-	if _, exists := payload.Secrets[req.Key]; !exists {
+	err := vault.UpdatePayload(s.vaultPath, s.dek, func(payload *vault.Payload) error {
+		if _, exists := payload.Secrets[req.Key]; !exists {
+			return errSecretNotFound
+		}
+		delete(payload.Secrets, req.Key)
+		return nil
+	})
+	if errors.Is(err, errSecretNotFound) {
 		return errResp(protocol.ErrCodeNotFound, fmt.Sprintf("secret %q not found", req.Key))
 	}
-	delete(payload.Secrets, req.Key)
-
-	if err := vault.WritePayload(s.vaultPath, s.dek, payload); err != nil {
+	if err != nil {
 		return errResp(protocol.ErrCodeInternal, err.Error())
 	}
 	return protocol.Response{V: protocol.Version, OK: true}

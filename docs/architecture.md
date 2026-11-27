@@ -2,7 +2,7 @@
 
 ## Storage layout
 
-All files and sockets live inside `0700` directories with `0600` file permissions:
+All files and sockets live inside `0700` directories with `0600` file permissions. `envctl` creates the directories when they are missing and refuses to use an existing directory that other users can access:
 
 - `~/.config/envctl/config.json` stores `unlock_mode` and `unlock_ttl`
 - `~/.local/share/envctl/vault.enc` stores the encrypted vault envelope
@@ -18,7 +18,7 @@ All files and sockets live inside `0700` directories with `0600` file permission
 
 When unlocking, deriving the KEK and decrypting the wrapped DEK verifies the password via the GCM authentication tag and yields the DEK in memory. Rotating the master password (`envctl passwd`) re-wraps the DEK with a new salt and KEK without re-encrypting the payload.
 
-Every write to `vault.enc` goes to a `0600` temporary file in the same directory, calls `fsync`, and atomically replaces `vault.enc` via `rename`.
+Every write to `vault.enc` goes to a `0600` temporary file in the same directory, calls `fsync`, and atomically replaces `vault.enc` via `rename`. Each read-modify-write cycle holds an exclusive `flock` on `vault.enc.lock`, so a secret written by the daemon and a password change made by `envctl passwd` cannot overwrite each other.
 
 ## Daemon lifecycle
 
@@ -34,6 +34,8 @@ Every write to `vault.enc` goes to a `0600` temporary file in the same directory
 Clients and the daemon exchange versioned (`"v": 1`) newline-delimited JSON objects over the Unix socket, one request and response per connection (max message size 16 MiB).
 
 Request operations: `status`, `unlock`, `lock`, `get` (batched `keys: string[]`), `list`, `set`, and `delete`. The TypeScript SDK only issues `status` and `get`.
+
+A request may carry `"vault": "<absolute path>"`. The daemon then rejects it with `INVALID_REQUEST` unless that is the vault it serves. The CLI sends it so that a command run with a different `ENVCTL_DATA_DIR` cannot read or write the wrong vault.
 
 ```json
 {"v":1,"op":"get","keys":["OPENROUTER_API_KEY","LOCAL_DB_PASS"]}

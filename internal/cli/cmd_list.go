@@ -1,17 +1,19 @@
 package cli
 
-import (
-	"errors"
-
-	"github.com/NickAwrist/envctl/internal/daemon"
-	"github.com/NickAwrist/envctl/internal/paths"
-)
-
 func (a *App) cmdList(args []string) error {
-	if len(args) > 0 {
-		return errors.New("list takes no arguments")
+	fs := a.newCommand("list",
+		"envctl list",
+		"List stored secret keys with their last update and description. Values are never printed.")
+	if err := fs.parse(args); err != nil {
+		return err
 	}
-	client := daemon.NewClient(paths.SocketPath())
+	if fs.NArg() > 0 {
+		return fs.usageError()
+	}
+	client, err := newClient()
+	if err != nil {
+		return err
+	}
 	entries, err := client.List()
 	if err != nil {
 		return err

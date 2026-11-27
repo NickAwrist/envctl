@@ -2,9 +2,11 @@ package vault
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,8 +16,7 @@ import (
 var fastKDF = crypto.KDFParams{Time: 1, Memory: 8 * 1024, Threads: 1}
 
 func TestVaultLifecycleAndPasswordRotation(t *testing.T) {
-	dir := t.TempDir()
-	vaultPath := filepath.Join(dir, "vault.enc")
+	vaultPath := filepath.Join(t.TempDir(), "data", "vault.enc")
 
 	pw1 := []byte("initial-master-password")
 	if err := InitWithParams(vaultPath, pw1, fastKDF); err != nil {
@@ -44,18 +45,17 @@ func TestVaultLifecycleAndPasswordRotation(t *testing.T) {
 	defer crypto.Zero(dek)
 
 	now := time.Now().UTC()
-	p := &Payload{
-		Secrets: map[string]Entry{
-			"OPENROUTER_API_KEY": {
-				Value:       "sk-or-super-secret-value-123",
-				Description: "Shared OpenRouter key",
-				CreatedAt:   now,
-				UpdatedAt:   now,
-			},
-		},
-	}
-	if err := WritePayload(vaultPath, dek, p); err != nil {
-		t.Fatalf("WritePayload: %v", err)
+	err = UpdatePayload(vaultPath, dek, func(p *Payload) error {
+		p.Secrets["OPENROUTER_API_KEY"] = Entry{
+			Value:       "sk-or-super-secret-value-123",
+			Description: "Shared OpenRouter key",
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("UpdatePayload: %v", err)
 	}
 
 	// On-disk file must never contain plaintext secret key or value.
@@ -95,6 +95,67 @@ func TestVaultLifecycleAndPasswordRotation(t *testing.T) {
 	}
 	if got2.Secrets["OPENROUTER_API_KEY"].Value != "sk-or-super-secret-value-123" {
 		t.Fatalf("secret corrupted after password rotation")
+	}
+}
+
+// A password change racing secret writes must lose neither: every stored
+// secret survives and only the newest password unlocks the vault.
+func TestPasswordChangeDoesNotRaceSecretWrites(t *testing.T) {
+	vaultPath := filepath.Join(t.TempDir(), "data", "vault.enc")
+	if err := InitWithParams(vaultPath, []byte("pw-0"), fastKDF); err != nil {
+		t.Fatalf("InitWithParams: %v", err)
+	}
+	dek, err := UnwrapDEK(vaultPath, []byte("pw-0"))
+	if err != nil {
+		t.Fatalf("UnwrapDEK: %v", err)
+	}
+	defer crypto.Zero(dek)
+
+	const writes, rotations = 200, 20
+	var wg sync.WaitGroup
+	wg.Add(2)
+	errC := make(chan error, 2)
+	go func() {
+		defer wg.Done()
+		for i := range writes {
+			err := UpdatePayload(vaultPath, dek, func(p *Payload) error {
+				p.Secrets[fmt.Sprintf("KEY_%d", i)] = Entry{Value: "v"}
+				return nil
+			})
+			if err != nil {
+				errC <- fmt.Errorf("UpdatePayload %d: %w", i, err)
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := range rotations {
+			oldPw, newPw := fmt.Sprintf("pw-%d", i), fmt.Sprintf("pw-%d", i+1)
+			if err := ChangePasswordWithParams(vaultPath, []byte(oldPw), []byte(newPw), fastKDF); err != nil {
+				errC <- fmt.Errorf("ChangePassword %d: %w", i, err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
+	close(errC)
+	for err := range errC {
+		t.Fatal(err)
+	}
+
+	if _, err := UnwrapDEK(vaultPath, []byte("pw-0")); !errors.Is(err, ErrInvalidPassword) {
+		t.Fatalf("expected the original password to stop working, got %v", err)
+	}
+	if _, err := UnwrapDEK(vaultPath, fmt.Appendf(nil, "pw-%d", rotations)); err != nil {
+		t.Fatalf("expected the newest password to work: %v", err)
+	}
+	payload, err := ReadPayload(vaultPath, dek)
+	if err != nil {
+		t.Fatalf("ReadPayload: %v", err)
+	}
+	if len(payload.Secrets) != writes {
+		t.Fatalf("expected %d secrets after concurrent password changes, got %d", writes, len(payload.Secrets))
 	}
 }
 

@@ -1,18 +1,20 @@
 package cli
 
-import (
-	"errors"
-
-	"github.com/NickAwrist/envctl/internal/daemon"
-	"github.com/NickAwrist/envctl/internal/paths"
-)
-
 func (a *App) cmdDelete(args []string) error {
-	if len(args) != 1 {
-		return errors.New("usage: envctl rm <KEY>")
+	fs := a.newCommand("rm",
+		"envctl rm <KEY>",
+		"Delete a secret from the vault.")
+	if err := fs.parse(reorderFlags(args, nil)); err != nil {
+		return err
 	}
-	key := args[0]
-	client := daemon.NewClient(paths.SocketPath())
+	if fs.NArg() != 1 {
+		return fs.usageError()
+	}
+	key := fs.Arg(0)
+	client, err := newClient()
+	if err != nil {
+		return err
+	}
 	if err := client.Delete(key); err != nil {
 		return err
 	}

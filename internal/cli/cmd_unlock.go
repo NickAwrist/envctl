@@ -2,7 +2,6 @@ package cli
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"time"
 
@@ -14,15 +13,22 @@ import (
 )
 
 func (a *App) cmdUnlock(args []string) error {
-	fs := flag.NewFlagSet("unlock", flag.ContinueOnError)
-	ttlFlag := fs.String("ttl", "", "Fixed unlock duration (e.g. 30m, 4h)")
-	sessionFlag := fs.Bool("session", false, "Unlock until current shell/SSH session exits")
-	sessionPIDFlag := fs.Int("session-pid", 0, "Override watched session PID (with --session)")
-	untilLockFlag := fs.Bool("until-lock", false, "Unlock until 'envctl lock' or reboot")
-	passwordFile := fs.String("password-file", "", "Read master password from file")
-	fromStdin := fs.Bool("stdin", false, "Read master password from stdin")
-	if err := fs.Parse(args); err != nil {
+	fs := a.newCommand("unlock",
+		"envctl unlock [--ttl <duration> | --session | --until-lock] [--password-file <path> | --stdin]",
+		"Unlock the vault and start the background daemon. Without a mode flag it uses\n"+
+			"unlock_mode and unlock_ttl from the config. The master password is prompted for\n"+
+			"on a terminal; otherwise pass --password-file or --stdin.")
+	ttlFlag := fs.String("ttl", "", "Stay unlocked for a fixed `duration` (e.g. 30m, 4h)")
+	sessionFlag := fs.Bool("session", false, "Stay unlocked until the current shell or SSH session exits")
+	sessionPIDFlag := fs.Int("session-pid", 0, "With --session, watch this `pid` instead of the session leader")
+	untilLockFlag := fs.Bool("until-lock", false, "Stay unlocked until 'envctl lock' or reboot")
+	passwordFile := fs.String("password-file", "", "Read the master password from the file at `path`")
+	fromStdin := fs.Bool("stdin", false, "Read the master password from stdin")
+	if err := fs.parse(args); err != nil {
 		return err
+	}
+	if fs.NArg() > 0 {
+		return fs.usageError()
 	}
 
 	modeFlags := 0
@@ -44,7 +50,7 @@ func (a *App) cmdUnlock(args []string) error {
 		return err
 	}
 	if !vault.Exists(vaultPath) {
-		return fmt.Errorf("vault not found at %s (run 'envctl init' first)", vaultPath)
+		return errNoVault(vaultPath)
 	}
 	configPath, err := paths.ConfigFile()
 	if err != nil {
@@ -93,7 +99,7 @@ func (a *App) cmdUnlock(args []string) error {
 	}
 	defer crypto.Zero(pw)
 
-	status, err := unlockDaemon(paths.SocketPath(), vaultPath, string(pw), mode, ttl, sessionPID)
+	status, err := unlockDaemon(string(pw), mode, ttl, sessionPID)
 	if err != nil {
 		return err
 	}

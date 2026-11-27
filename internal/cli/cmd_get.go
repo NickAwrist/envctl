@@ -1,19 +1,24 @@
 package cli
 
 import (
-	"errors"
 	"fmt"
-
-	"github.com/NickAwrist/envctl/internal/daemon"
-	"github.com/NickAwrist/envctl/internal/paths"
 )
 
 func (a *App) cmdGet(args []string) error {
-	if len(args) != 1 {
-		return errors.New("usage: envctl get <KEY>")
+	fs := a.newCommand("get",
+		"envctl get <KEY>",
+		"Print a single secret value: raw when piped, with a trailing newline on a terminal.")
+	if err := fs.parse(reorderFlags(args, nil)); err != nil {
+		return err
 	}
-	key := args[0]
-	client := daemon.NewClient(paths.SocketPath())
+	if fs.NArg() != 1 {
+		return fs.usageError()
+	}
+	key := fs.Arg(0)
+	client, err := newClient()
+	if err != nil {
+		return err
+	}
 	values, missing, err := client.Get([]string{key})
 	if err != nil {
 		return err

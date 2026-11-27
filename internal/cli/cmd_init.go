@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 
@@ -15,11 +14,17 @@ import (
 )
 
 func (a *App) cmdInit(args []string) error {
-	fs := flag.NewFlagSet("init", flag.ContinueOnError)
-	passwordFile := fs.String("password-file", "", "Read master password from file")
-	fromStdin := fs.Bool("stdin", false, "Read master password from stdin")
-	if err := fs.Parse(args); err != nil {
+	fs := a.newCommand("init",
+		"envctl init [--password-file <path> | --stdin]",
+		"Create the encrypted vault and the default config. The master password is\n"+
+			"prompted for on a terminal; otherwise pass --password-file or --stdin.")
+	passwordFile := fs.String("password-file", "", "Read the master password from the file at `path`")
+	fromStdin := fs.Bool("stdin", false, "Read the master password from stdin")
+	if err := fs.parse(args); err != nil {
 		return err
+	}
+	if fs.NArg() > 0 {
+		return fs.usageError()
 	}
 
 	vaultPath, err := paths.VaultFile()

@@ -17,6 +17,12 @@ Check that `~/.local/bin` is on your `PATH`:
 envctl version
 ```
 
+Every command prints its arguments and flags with `--help` (or `envctl help <command>`):
+
+```sh
+envctl set --help
+```
+
 ## First-time setup
 
 Create the encrypted vault and default config file:
@@ -65,7 +71,7 @@ Secret key names must start with a letter, digit, or underscore and use 1 to 128
 envctl set OPENROUTER_API_KEY -d "Shared OpenRouter key"
 
 # Pipe a value from stdin or read from a file
-cat key.txt | envctl set OPENROUTER_API_KEY --stdin
+cat key.txt | envctl set OPENROUTER_API_KEY
 envctl set OPENROUTER_API_KEY --value-file ./key.txt
 
 # Read a single secret (raw when piped, newline on TTY)
@@ -80,6 +86,8 @@ envctl rm OPENROUTER_API_KEY
 
 Updating an existing key without passing `-d` / `--description` keeps its previous description.
 
+When stdin is not a terminal, `envctl set` reads all of it as the value, so multi-line secrets such as PEM keys are stored whole. `--stdin` forces the same behavior on a terminal. One trailing newline is stripped. An empty value is rejected and leaves any existing secret unchanged. The value is never read from the command line: `envctl set KEY=VALUE` fails without printing the argument.
+
 ## Working with `.env` files
 
 Reference secrets anywhere in a `.env` file using `%ENVCTL-<KEY>%`, either as a full value or inline inside a larger string:
@@ -90,12 +98,16 @@ DATABASE_URL=postgres://app:%ENVCTL-LOCAL_DB_PASS%@localhost:5432/mydb
 PORT=3000
 ```
 
+Quoted values may span several lines. Text after ` #` is a comment, so `KEY= # note` is an empty value.
+
 Verify that every referenced secret exists in the vault without printing any values:
 
 ```sh
 envctl check
 envctl check --env-file .env.local
 ```
+
+`envctl check` also fails on references that would be passed through unresolved, such as `%ENVCTL-KEY` without the closing `%` or a lowercase `%envctl-key%`.
 
 Run any command with resolved environment variables injected in memory (never writing plaintext secrets to disk):
 
@@ -105,6 +117,10 @@ envctl run --env-file .env.local --override -- bun run src/index.ts
 ```
 
 If the vault is locked when you run `envctl run` in an interactive terminal, it prompts for your master password inline, unlocks the daemon, and launches the command.
+
+`envctl run` also resolves `%ENVCTL-<KEY>%` references in variables that are already in its environment (for example from a systemd `EnvironmentFile` or Docker Compose), the same way the SDK does. A variable already set in the environment wins over the `.env` file unless `--override` is passed.
+
+Once the variables are resolved, `envctl run` replaces itself with the command. Signals such as Ctrl-C reach the command directly, and the command's exit status is the one your shell sees. If the command is not found `envctl run` exits 127, and 126 if it cannot be executed.
 
 ## Locking, status, and rotating passwords
 
@@ -124,3 +140,5 @@ envctl passwd   # changes the master password by re-wrapping the DEK
 | `ENVCTL_DATA_DIR` | Overrides the vault directory (default `$XDG_DATA_HOME/envctl` or `~/.local/share/envctl`) |
 | `ENVCTL_SOCKET` | Overrides the daemon Unix socket path |
 | `NO_COLOR` | Disables ANSI colors on terminal output |
+
+`envctl` creates these directories with mode `0700` when they do not exist. It never changes an existing directory: one that other users can access is rejected, and a socket path that points at an existing non-socket file is refused. A daemon serves one vault, so use a separate `ENVCTL_SOCKET` for each `ENVCTL_DATA_DIR`. Commands fail if the daemon on the socket serves a different vault.

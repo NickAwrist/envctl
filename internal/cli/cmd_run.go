@@ -2,29 +2,38 @@ package cli
 
 import (
 	"errors"
-	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
-	"os/signal"
 	"strings"
 	"syscall"
 
 	"github.com/NickAwrist/envctl/internal/daemon"
 	"github.com/NickAwrist/envctl/internal/dotenv"
-	"github.com/NickAwrist/envctl/internal/paths"
+)
+
+const (
+	exitCannotExecute   = 126
+	exitCommandNotFound = 127
 )
 
 func (a *App) cmdRun(args []string) error {
-	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	envFile := fs.String("env-file", ".env", "Path to .env file")
-	override := fs.Bool("override", false, "Override existing process environment variables")
-	if err := fs.Parse(args); err != nil {
+	cmd := a.newCommand("run",
+		"envctl run [--env-file <path>] [--override] -- <command> [args...]",
+		"Resolve the %ENVCTL-<KEY>% references in a .env file and in the current\n"+
+			"environment, then replace envctl with <command>, which receives the resolved\n"+
+			"variables. Nothing is written to disk. Variables already set in the\n"+
+			"environment win over the .env file unless --override is given.\n"+
+			"Exits 127 if <command> is not found and 126 if it cannot be executed.")
+	envFile := cmd.String("env-file", ".env", "Read the .env file at `path`")
+	override := cmd.Bool("override", false, "Let the .env file win over variables already set in the environment")
+	if err := cmd.parse(args); err != nil {
 		return err
 	}
-	cmdArgs := fs.Args()
+	cmdArgs := cmd.Args()
 	if len(cmdArgs) == 0 {
-		return errors.New("usage: envctl run [--env-file .env] [--override] -- <command> [args...]")
+		return cmd.usageError()
 	}
 
 	data, err := os.ReadFile(*envFile)
@@ -34,7 +43,10 @@ func (a *App) cmdRun(args []string) error {
 	parsed := dotenv.Parse(string(data))
 	existing := environMap()
 
-	client := daemon.NewClient(paths.SocketPath())
+	client, err := newClient()
+	if err != nil {
+		return err
+	}
 	resolve := func() (map[string]string, []string, error) {
 		return dotenv.Resolve(parsed, existing, *override, client.Get)
 	}
@@ -53,41 +65,17 @@ func (a *App) cmdRun(args []string) error {
 		return fmt.Errorf("missing secrets in vault: %s", strings.Join(missing, ", "))
 	}
 
-	child := exec.Command(cmdArgs[0], cmdArgs[1:]...)
-	child.Env = mergeEnviron(existing, resolved)
-	child.Stdin = os.Stdin
-	child.Stdout = os.Stdout
-	child.Stderr = os.Stderr
-
-	if err := child.Start(); err != nil {
-		return err
+	path, err := exec.LookPath(cmdArgs[0])
+	if err != nil {
+		code := exitCommandNotFound
+		if errors.Is(err, fs.ErrPermission) {
+			code = exitCannotExecute
+		}
+		return &ExitCodeError{Code: code, Err: err}
 	}
 
-	sigC := make(chan os.Signal, 2)
-	signal.Notify(sigC, syscall.SIGINT, syscall.SIGTERM)
-	doneC := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case sig := <-sigC:
-				if child.Process != nil {
-					_ = child.Process.Signal(sig)
-				}
-			case <-doneC:
-				return
-			}
-		}
-	}()
-
-	waitErr := child.Wait()
-	close(doneC)
-	signal.Stop(sigC)
-	if waitErr != nil {
-		var exitErr *exec.ExitError
-		if errors.As(waitErr, &exitErr) {
-			return &ExitCodeError{Code: exitErr.ExitCode()}
-		}
-		return waitErr
-	}
-	return nil
+	// Replace this process with the command so signals, the terminal, and the
+	// exit status belong to it directly.
+	err = syscall.Exec(path, cmdArgs, mergeEnviron(existing, resolved))
+	return &ExitCodeError{Code: exitCannotExecute, Err: fmt.Errorf("exec %s: %w", path, err)}
 }

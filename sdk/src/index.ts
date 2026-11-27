@@ -57,7 +57,8 @@ function isEnoent(err: unknown): boolean {
 /**
  * Reads a .env file (if present) and scans baseEnv for %ENVCTL-...% placeholders,
  * resolves all referenced secrets via the running envctl daemon in a single batch
- * call, and returns the resolved variables without mutating process.env.
+ * call, and returns the effective value of every variable named in the .env file
+ * or resolved from baseEnv, without mutating process.env.
  */
 export async function resolveEnv(
   options: ResolveEnvOptions = {},
@@ -73,10 +74,12 @@ export async function resolveEnv(
     parsed = parseDotenv(content);
   } catch (err: unknown) {
     if (!optional || !isEnoent(err)) {
-      throw err;
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new EnvctlError("ENV_FILE", `Cannot read env file: ${reason}`, { cause: err });
     }
   }
 
+  const resolved: Record<string, string> = {};
   const pending = new Map<string, string>();
   const neededSecrets = new Set<string>();
 
@@ -85,6 +88,7 @@ export async function resolveEnv(
     if (!override) {
       const existing = baseEnv[envKey];
       if (existing !== undefined && !hasPlaceholder(existing)) {
+        resolved[envKey] = existing;
         continue;
       }
     }
@@ -119,7 +123,6 @@ export async function resolveEnv(
     secrets = res.values;
   }
 
-  const resolved: Record<string, string> = {};
   for (const [envKey, raw] of pending) {
     if (hasPlaceholder(raw)) {
       const { value, missing } = replacePlaceholders(raw, secrets);
@@ -138,7 +141,7 @@ export async function resolveEnv(
 /**
  * Reads a .env file, resolves %ENVCTL-...% placeholders via the envctl daemon,
  * writes the resolved values into process.env (or options.target), and returns
- * the entries that were set.
+ * them. Precedence is checked against options.target unless baseEnv is given.
  */
 export async function loadEnv(
   options: LoadEnvOptions = {},

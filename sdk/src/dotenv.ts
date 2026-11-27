@@ -9,8 +9,10 @@ export function parseDotenv(content: string): ParsedDotenv {
   const values: Record<string, string> = {};
   const order: string[] = [];
 
-  for (const rawLine of content.split("\n")) {
-    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+  let rest = content.replace(/^\uFEFF/, "").replaceAll("\r\n", "\n");
+  while (rest !== "") {
+    let line: string;
+    [line, rest] = cutLine(rest);
     let trimmed = line.trim();
     if (trimmed === "" || trimmed.startsWith("#")) {
       continue;
@@ -26,7 +28,17 @@ export function parseDotenv(content: string): ParsedDotenv {
     if (!key) {
       continue;
     }
-    const rawVal = trimmed.slice(eqIdx + 1).trim();
+    let rawVal = trimmed.slice(eqIdx + 1);
+
+    // A quoted value may span lines. Without a closing quote it ends on this line.
+    if (closingQuote(rawVal.trimStart()) === UNTERMINATED) {
+      const tail = `${line.slice(line.indexOf("=") + 1).trimStart()}\n${rest}`;
+      const end = closingQuote(tail);
+      if (end >= 0) {
+        rawVal = tail.slice(0, end + 1);
+        [, rest] = cutLine(tail.slice(end + 1));
+      }
+    }
     const val = parseValue(rawVal);
 
     if (!(key in values)) {
@@ -38,23 +50,55 @@ export function parseDotenv(content: string): ParsedDotenv {
   return { values, order };
 }
 
+function cutLine(text: string): [line: string, rest: string] {
+  const idx = text.indexOf("\n");
+  return idx < 0 ? [text, ""] : [text.slice(0, idx), text.slice(idx + 1)];
+}
+
+const NOT_QUOTED = -1;
+const UNTERMINATED = -2;
+
+/**
+ * Returns the index of the quote that closes a value starting with ' or ",
+ * NOT_QUOTED if the value is not quoted, or UNTERMINATED.
+ */
+function closingQuote(val: string): number {
+  const quote = val[0];
+  if (quote !== '"' && quote !== "'") {
+    return NOT_QUOTED;
+  }
+  for (let i = 1; i < val.length; i++) {
+    if (quote === '"' && val[i] === "\\") {
+      i++;
+    } else if (val[i] === quote) {
+      return i;
+    }
+  }
+  return UNTERMINATED;
+}
+
+/**
+ * Parses the text after "=", which keeps its leading whitespace so that a "#"
+ * right after it ("KEY= # note") is recognized as a comment.
+ */
 function parseValue(raw: string): string {
-  if (raw.length === 0) {
+  const val = raw.trim();
+  if (val.length === 0) {
     return "";
   }
-  if (raw[0] === '"') {
-    return parseDoubleQuoted(raw.slice(1));
+  if (val[0] === '"') {
+    return parseDoubleQuoted(val.slice(1));
   }
-  if (raw[0] === "'") {
-    const endIdx = raw.indexOf("'", 1);
-    return endIdx >= 0 ? raw.slice(1, endIdx) : raw.slice(1);
+  if (val[0] === "'") {
+    const endIdx = val.indexOf("'", 1);
+    return endIdx >= 0 ? val.slice(1, endIdx) : val.slice(1);
   }
   for (let i = 0; i < raw.length; i++) {
     if (raw[i] === "#" && i > 0 && (raw[i - 1] === " " || raw[i - 1] === "\t")) {
       return raw.slice(0, i).trim();
     }
   }
-  return raw;
+  return val;
 }
 
 function parseDoubleQuoted(rest: string): string {

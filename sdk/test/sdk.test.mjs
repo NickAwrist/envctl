@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, before, describe, it } from "node:test";
 import {
+  EnvctlError,
   EnvctlLockedError,
   EnvctlMissingKeysError,
   extractPlaceholders,
@@ -40,6 +41,27 @@ SINGLE='raw\\n%ENVCTL-RAW%'
     });
   });
 
+  it("parses multi-line quoted values and comments after an empty value", () => {
+    const parsed = parseDotenv(
+      "\uFEFFFIRST=1\r\n" +
+        'PEM="-----BEGIN KEY-----\r\nabc==\r\n-----END KEY-----" # trailing\r\n' +
+        "JSON='{\n  \"a\": 1\n}'\n" +
+        "EMPTY_WITH_COMMENT= # %ENVCTL-OLD_KEY%\n" +
+        "COLOR=#fff\n" +
+        'UNTERMINATED="oops\n' +
+        "AFTER=still parsed\n",
+    );
+    assert.deepEqual(parsed.values, {
+      FIRST: "1",
+      PEM: "-----BEGIN KEY-----\nabc==\n-----END KEY-----",
+      JSON: '{\n  "a": 1\n}',
+      EMPTY_WITH_COMMENT: "",
+      COLOR: "#fff",
+      UNTERMINATED: "oops",
+      AFTER: "still parsed",
+    });
+  });
+
   it("extracts and replaces inline placeholders", () => {
     const raw = "postgres://u:%ENVCTL-DB_PASS%@host/%ENVCTL-DB_NAME%";
     assert.deepEqual(extractPlaceholders(raw), ["DB_PASS", "DB_NAME"]);
@@ -48,7 +70,7 @@ SINGLE='raw\\n%ENVCTL-RAW%'
     assert.deepEqual(res.missing, []);
   });
 
-  it("skips daemon connection when existing env already provides non-placeholder values", async () => {
+  it("returns values the environment already provides without connecting to the daemon", async () => {
     const dir = mkdtempSync(join(tmpdir(), "envctl-sdk-nod-"));
     try {
       const envPath = join(dir, ".env");
@@ -59,10 +81,17 @@ SINGLE='raw\\n%ENVCTL-RAW%'
         socketPath: join(dir, "does-not-exist.sock"),
         baseEnv: { API_KEY: "already-from-ci" },
       });
-      assert.deepEqual(resolved, { PORT: "8080" });
+      assert.deepEqual(resolved, { API_KEY: "already-from-ci", PORT: "8080" });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("reports an unreadable .env file as an EnvctlError", async () => {
+    await assert.rejects(
+      () => resolveEnv({ path: join(tmpdir(), "envctl-sdk-no-such-file.env"), baseEnv: {} }),
+      (err) => err instanceof EnvctlError && err.code === "ENV_FILE",
+    );
   });
 });
 
