@@ -26,8 +26,8 @@ Every write to `vault.enc` goes to a `0600` temporary file in the same directory
 
 - **Minimal RAM exposure.** The daemon holds only the 32-byte DEK in memory, not a plaintext map of secrets. Each `get` or `list` reads and decrypts `vault.enc` on demand, extracts only the requested keys, and zeroes temporary byte buffers.
 - **Auto-exit on lock.** On `envctl lock`, fixed TTL expiry, `SIGINT`/`SIGTERM`, or session exit, the daemon zeroes the DEK slice, removes the socket file, and exits so the OS reclaims its address space. If a newly started daemon receives no valid `unlock` within 15 seconds, it shuts down automatically.
-- **Session mode.** On Linux, `--session` monitors the login shell session leader PID (`Getsid(0)`) via `pidfd_open` and `poll`, locking immediately when the SSH or terminal session exits. Non-Linux platforms fall back to polling `kill(pid, 0)`.
-- **Peer authentication.** On Linux, every accepted socket connection is verified with `SO_PEERCRED` to confirm the caller's UID matches the daemon's UID. Clients also `lstat` the socket before connecting to verify it is a real Unix socket owned by the current user.
+- **Session mode.** `--session` monitors the login shell session leader PID (`Getsid(0)`) via `pidfd_open` and `poll`, locking immediately when the SSH or terminal session exits. Kernels without `pidfd_open` fall back to polling `kill(pid, 0)`.
+- **Peer authentication.** Every accepted socket connection is verified with `SO_PEERCRED` to confirm the caller's UID matches the daemon's UID. Clients also `lstat` the socket before connecting to verify it is a real Unix socket owned by the current user.
 
 ## Wire protocol
 

@@ -2,8 +2,8 @@
 
 ## Requirements
 
-- Linux or macOS (Linux uses `SO_PEERCRED` for peer UID checks and `pidfd_open` for instant session exit detection)
-- Go 1.24+ to build from source
+- Linux
+- Go 1.26.3+ to build from source
 
 ## Install
 
