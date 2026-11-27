@@ -127,10 +127,10 @@ Once the variables are resolved, `envctl run` replaces itself with the command. 
 ```sh
 envctl status   # lock state, active mode, expiry or watched PID, vault and socket paths
 envctl lock     # zeroes the key in memory and stops the daemon
-envctl passwd   # changes the master password by re-wrapping the DEK
+envctl passwd   # changes the master password and re-encrypts the vault with a new DEK
 ```
 
-`envctl passwd` also accepts `--old-password-file` and `--new-password-file`.
+`envctl passwd` also accepts `--old-password-file` and `--new-password-file`. It locks the vault when it finishes, so unlock again with the new password.
 
 ## Environment variables
 

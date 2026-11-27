@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -75,7 +74,8 @@ func TestVaultLifecycleAndPasswordRotation(t *testing.T) {
 		t.Fatalf("unexpected secret value: %q", got.Secrets["OPENROUTER_API_KEY"].Value)
 	}
 
-	// Rotate password: old password fails, new password unwraps same DEK and reads secret.
+	// Rotate password: the old password and the old DEK both stop working, and
+	// the new password unwraps a new DEK that reads the secret.
 	pw2 := []byte("rotated-master-password")
 	if err := ChangePasswordWithParams(vaultPath, pw1, pw2, fastKDF); err != nil {
 		t.Fatalf("ChangePasswordWithParams: %v", err)
@@ -88,6 +88,9 @@ func TestVaultLifecycleAndPasswordRotation(t *testing.T) {
 		t.Fatalf("UnwrapDEK with new password: %v", err)
 	}
 	defer crypto.Zero(dek2)
+	if _, err := ReadPayload(vaultPath, dek); !errors.Is(err, crypto.ErrAuthFailed) {
+		t.Fatalf("expected the old DEK to stop decrypting the vault, got %v", err)
+	}
 
 	got2, err := ReadPayload(vaultPath, dek2)
 	if err != nil {
@@ -98,64 +101,68 @@ func TestVaultLifecycleAndPasswordRotation(t *testing.T) {
 	}
 }
 
-// A password change racing secret writes must lose neither: every stored
-// secret survives and only the newest password unlocks the vault.
+// A password change racing secret writes must keep every write that reported
+// success, retire the previous DEK, and leave a vault the new password opens.
 func TestPasswordChangeDoesNotRaceSecretWrites(t *testing.T) {
 	vaultPath := filepath.Join(t.TempDir(), "data", "vault.enc")
 	if err := InitWithParams(vaultPath, []byte("pw-0"), fastKDF); err != nil {
 		t.Fatalf("InitWithParams: %v", err)
 	}
-	dek, err := UnwrapDEK(vaultPath, []byte("pw-0"))
-	if err != nil {
-		t.Fatalf("UnwrapDEK: %v", err)
-	}
-	defer crypto.Zero(dek)
 
-	const writes, rotations = 200, 20
-	var wg sync.WaitGroup
-	wg.Add(2)
-	errC := make(chan error, 2)
-	go func() {
-		defer wg.Done()
-		for i := range writes {
+	stored := 0
+	for round := range 20 {
+		oldPw, newPw := fmt.Appendf(nil, "pw-%d", round), fmt.Appendf(nil, "pw-%d", round+1)
+		dek, err := UnwrapDEK(vaultPath, oldPw)
+		if err != nil {
+			t.Fatalf("UnwrapDEK: %v", err)
+		}
+
+		var changeErr error
+		changed := make(chan struct{})
+		go func() {
+			defer close(changed)
+			changeErr = ChangePasswordWithParams(vaultPath, oldPw, newPw, fastKDF)
+		}()
+
+		// Keep writing with the current DEK until the password change retires it.
+		for retired := false; !retired; {
+			afterChange := false
+			select {
+			case <-changed:
+				if changeErr != nil {
+					t.Fatalf("ChangePasswordWithParams: %v", changeErr)
+				}
+				afterChange = true
+			default:
+			}
 			err := UpdatePayload(vaultPath, dek, func(p *Payload) error {
-				p.Secrets[fmt.Sprintf("KEY_%d", i)] = Entry{Value: "v"}
+				p.Secrets[fmt.Sprintf("KEY_%d", stored)] = Entry{Value: "v"}
 				return nil
 			})
-			if err != nil {
-				errC <- fmt.Errorf("UpdatePayload %d: %w", i, err)
-				return
+			switch {
+			case errors.Is(err, crypto.ErrAuthFailed):
+				retired = true
+			case err != nil:
+				t.Fatalf("UpdatePayload: %v", err)
+			case afterChange:
+				t.Fatalf("a write with the previous DEK succeeded after the password change")
+			default:
+				stored++
 			}
 		}
-	}()
-	go func() {
-		defer wg.Done()
-		for i := range rotations {
-			oldPw, newPw := fmt.Sprintf("pw-%d", i), fmt.Sprintf("pw-%d", i+1)
-			if err := ChangePasswordWithParams(vaultPath, []byte(oldPw), []byte(newPw), fastKDF); err != nil {
-				errC <- fmt.Errorf("ChangePassword %d: %w", i, err)
-				return
-			}
-		}
-	}()
-	wg.Wait()
-	close(errC)
-	for err := range errC {
-		t.Fatal(err)
-	}
+		<-changed
 
-	if _, err := UnwrapDEK(vaultPath, []byte("pw-0")); !errors.Is(err, ErrInvalidPassword) {
-		t.Fatalf("expected the original password to stop working, got %v", err)
-	}
-	if _, err := UnwrapDEK(vaultPath, fmt.Appendf(nil, "pw-%d", rotations)); err != nil {
-		t.Fatalf("expected the newest password to work: %v", err)
-	}
-	payload, err := ReadPayload(vaultPath, dek)
-	if err != nil {
-		t.Fatalf("ReadPayload: %v", err)
-	}
-	if len(payload.Secrets) != writes {
-		t.Fatalf("expected %d secrets after concurrent password changes, got %d", writes, len(payload.Secrets))
+		newDEK, err := UnwrapDEK(vaultPath, newPw)
+		if err != nil {
+			t.Fatalf("UnwrapDEK with the new password: %v", err)
+		}
+		payload, err := ReadPayload(vaultPath, newDEK)
+		if err != nil {
+			t.Fatalf("ReadPayload after password change %d: %v", round, err)
+		}
+		if len(payload.Secrets) != stored {
+			t.Fatalf("expected %d secrets after password change %d, got %d", stored, round, len(payload.Secrets))
+		}
 	}
 }
 

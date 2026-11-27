@@ -155,6 +155,28 @@ func TestCLIEndToEnd(t *testing.T) {
 		t.Fatalf("expected exit 127 for a missing command, got %d: %q", ws.ExitStatus(), out)
 	}
 
+	// passwd retires the data key the daemon holds, so it locks the vault. Only
+	// the new password unlocks it, and the secrets survive.
+	newPwFile := filepath.Join(dir, "new-pw.txt")
+	if err := os.WriteFile(newPwFile, []byte("rotated-pass\n"), 0o600); err != nil {
+		t.Fatalf("write new pw file: %v", err)
+	}
+	if out, err := runCLI("", "passwd", "--old-password-file", pwFile, "--new-password-file", newPwFile); err != nil {
+		t.Fatalf("passwd failed: %v\n%s", err, out)
+	}
+	if out, err := runCLI("", "get", "OPENROUTER_API_KEY"); err == nil {
+		t.Fatalf("expected the vault to be locked after passwd, got %q", out)
+	}
+	if out, err := runCLI("", "unlock", "--password-file", pwFile); err == nil {
+		t.Fatalf("expected the old password to be rejected, got %q", out)
+	}
+	if out, err := runCLI("", "unlock", "--password-file", newPwFile); err != nil {
+		t.Fatalf("unlock with the new password failed: %v\n%s", err, out)
+	}
+	if out, err := runCLI("", "get", "OPENROUTER_API_KEY"); err != nil || out != "sk-or-live-999" {
+		t.Fatalf("secret lost after passwd: err=%v out=%q", err, out)
+	}
+
 	if out, err := runCLI("", "lock"); err != nil {
 		t.Fatalf("lock failed: %v\n%s", err, out)
 	}

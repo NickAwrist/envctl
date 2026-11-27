@@ -86,56 +86,71 @@ func InitWithParams(path string, password []byte, params crypto.KDFParams) error
 		return fmt.Errorf("%w at %s", ErrVaultExists, path)
 	}
 
-	salt, err := crypto.RandomBytes(crypto.SaltSize)
-	if err != nil {
-		return err
-	}
 	dek, err := crypto.RandomBytes(crypto.KeySize)
 	if err != nil {
 		return err
 	}
 	defer crypto.Zero(dek)
 
+	kdf, wrappedDEK, err := wrapDEK(dek, password, params)
+	if err != nil {
+		return err
+	}
+	payload, err := sealPayload(dek, &Payload{})
+	if err != nil {
+		return err
+	}
+	return writeEnvelopeAtomic(path, Envelope{
+		Version:    CurrentVersion,
+		KDF:        kdf,
+		WrappedDEK: wrappedDEK,
+		Payload:    payload,
+	})
+}
+
+// wrapDEK encrypts dek under a key derived from password and a fresh salt.
+func wrapDEK(dek, password []byte, params crypto.KDFParams) (KDFMetadata, CipherBlob, error) {
+	salt, err := crypto.RandomBytes(crypto.SaltSize)
+	if err != nil {
+		return KDFMetadata{}, CipherBlob{}, err
+	}
 	kek := crypto.DeriveKey(password, salt, params)
 	defer crypto.Zero(kek)
 
-	dekNonce, dekCipher, err := crypto.Encrypt(kek, dek, aadDEK)
+	wrapped, err := seal(kek, dek, aadDEK)
 	if err != nil {
-		return err
+		return KDFMetadata{}, CipherBlob{}, err
 	}
+	return KDFMetadata{
+		Algorithm: kdfAlgArgon2id,
+		Salt:      base64.StdEncoding.EncodeToString(salt),
+		Time:      params.Time,
+		Memory:    params.Memory,
+		Threads:   params.Threads,
+	}, wrapped, nil
+}
 
-	emptyPayload := Payload{Secrets: map[string]Entry{}}
-	payloadBytes, err := json.Marshal(emptyPayload)
+func seal(key, plaintext, aad []byte) (CipherBlob, error) {
+	nonce, ciphertext, err := crypto.Encrypt(key, plaintext, aad)
 	if err != nil {
-		return err
+		return CipherBlob{}, err
 	}
-	defer crypto.Zero(payloadBytes)
+	return CipherBlob{
+		Nonce:      base64.StdEncoding.EncodeToString(nonce),
+		Ciphertext: base64.StdEncoding.EncodeToString(ciphertext),
+	}, nil
+}
 
-	payloadNonce, payloadCipher, err := crypto.Encrypt(dek, payloadBytes, aadPayload)
+func (b CipherBlob) open(key, aad []byte) ([]byte, error) {
+	nonce, err := base64.StdEncoding.DecodeString(b.Nonce)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("decode nonce: %w", err)
 	}
-
-	env := Envelope{
-		Version: CurrentVersion,
-		KDF: KDFMetadata{
-			Algorithm: kdfAlgArgon2id,
-			Salt:      base64.StdEncoding.EncodeToString(salt),
-			Time:      params.Time,
-			Memory:    params.Memory,
-			Threads:   params.Threads,
-		},
-		WrappedDEK: CipherBlob{
-			Nonce:      base64.StdEncoding.EncodeToString(dekNonce),
-			Ciphertext: base64.StdEncoding.EncodeToString(dekCipher),
-		},
-		Payload: CipherBlob{
-			Nonce:      base64.StdEncoding.EncodeToString(payloadNonce),
-			Ciphertext: base64.StdEncoding.EncodeToString(payloadCipher),
-		},
+	ciphertext, err := base64.StdEncoding.DecodeString(b.Ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("decode ciphertext: %w", err)
 	}
-
-	return writeEnvelopeAtomic(path, env)
+	return crypto.Decrypt(key, nonce, ciphertext, aad)
 }
 
 func UnwrapDEK(path string, password []byte) ([]byte, error) {
@@ -150,14 +165,6 @@ func UnwrapDEK(path string, password []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode salt: %w", err)
 	}
-	nonce, err := base64.StdEncoding.DecodeString(env.WrappedDEK.Nonce)
-	if err != nil {
-		return nil, fmt.Errorf("decode wrapped DEK nonce: %w", err)
-	}
-	ciphertext, err := base64.StdEncoding.DecodeString(env.WrappedDEK.Ciphertext)
-	if err != nil {
-		return nil, fmt.Errorf("decode wrapped DEK ciphertext: %w", err)
-	}
 
 	kek := crypto.DeriveKey(password, salt, crypto.KDFParams{
 		Time:    env.KDF.Time,
@@ -166,12 +173,12 @@ func UnwrapDEK(path string, password []byte) ([]byte, error) {
 	})
 	defer crypto.Zero(kek)
 
-	dek, err := crypto.Decrypt(kek, nonce, ciphertext, aadDEK)
+	dek, err := env.WrappedDEK.open(kek, aadDEK)
+	if errors.Is(err, crypto.ErrAuthFailed) {
+		return nil, ErrInvalidPassword
+	}
 	if err != nil {
-		if errors.Is(err, crypto.ErrAuthFailed) {
-			return nil, ErrInvalidPassword
-		}
-		return nil, err
+		return nil, fmt.Errorf("unwrap DEK: %w", err)
 	}
 	return dek, nil
 }
@@ -181,16 +188,7 @@ func ReadPayload(path string, dek []byte) (*Payload, error) {
 	if err != nil {
 		return nil, err
 	}
-	nonce, err := base64.StdEncoding.DecodeString(env.Payload.Nonce)
-	if err != nil {
-		return nil, fmt.Errorf("decode payload nonce: %w", err)
-	}
-	ciphertext, err := base64.StdEncoding.DecodeString(env.Payload.Ciphertext)
-	if err != nil {
-		return nil, fmt.Errorf("decode payload ciphertext: %w", err)
-	}
-
-	plaintext, err := crypto.Decrypt(dek, nonce, ciphertext, aadPayload)
+	plaintext, err := env.Payload.open(dek, aadPayload)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt vault payload: %w", err)
 	}
@@ -227,71 +225,72 @@ func writePayload(path string, dek []byte, payload *Payload) error {
 	if err != nil {
 		return err
 	}
+	env.Payload, err = sealPayload(dek, payload)
+	if err != nil {
+		return err
+	}
+	return writeEnvelopeAtomic(path, env)
+}
+
+func sealPayload(dek []byte, payload *Payload) (CipherBlob, error) {
 	if payload.Secrets == nil {
 		payload.Secrets = map[string]Entry{}
 	}
 	plaintext, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("marshal vault payload: %w", err)
+		return CipherBlob{}, fmt.Errorf("marshal vault payload: %w", err)
 	}
 	defer crypto.Zero(plaintext)
-
-	nonce, ciphertext, err := crypto.Encrypt(dek, plaintext, aadPayload)
-	if err != nil {
-		return err
-	}
-	env.Payload = CipherBlob{
-		Nonce:      base64.StdEncoding.EncodeToString(nonce),
-		Ciphertext: base64.StdEncoding.EncodeToString(ciphertext),
-	}
-	return writeEnvelopeAtomic(path, env)
+	return seal(dek, plaintext, aadPayload)
 }
 
 func ChangePassword(path string, oldPassword, newPassword []byte) error {
 	return ChangePasswordWithParams(path, oldPassword, newPassword, crypto.DefaultKDFParams())
 }
 
+// ChangePasswordWithParams re-encrypts the vault under a new data key wrapped
+// by newPassword. The old password and the old data key stop working, so a DEK
+// held by a running daemon no longer opens the vault.
 func ChangePasswordWithParams(path string, oldPassword, newPassword []byte, params crypto.KDFParams) error {
 	if len(newPassword) == 0 {
 		return errors.New("new password cannot be empty")
 	}
-	dek, err := UnwrapDEK(path, oldPassword)
+	oldDEK, err := UnwrapDEK(path, oldPassword)
 	if err != nil {
 		return err
 	}
-	defer crypto.Zero(dek)
+	defer crypto.Zero(oldDEK)
 
-	salt, err := crypto.RandomBytes(crypto.SaltSize)
+	newDEK, err := crypto.RandomBytes(crypto.KeySize)
 	if err != nil {
 		return err
 	}
-	kek := crypto.DeriveKey(newPassword, salt, params)
-	defer crypto.Zero(kek)
-
-	nonce, ciphertext, err := crypto.Encrypt(kek, dek, aadDEK)
+	defer crypto.Zero(newDEK)
+	kdf, wrappedDEK, err := wrapDEK(newDEK, newPassword, params)
 	if err != nil {
 		return err
 	}
 
-	// Key derivation is slow, so only the envelope rewrite happens under the
-	// lock. It starts from the envelope as it is now, which keeps any payload
-	// written while the keys were being derived.
+	// Key derivation is slow, so only the re-encryption happens under the lock.
+	// It reads the payload as it is now, which keeps any secret written while
+	// the keys were being derived.
 	return withLock(path, func() error {
 		env, err := readEnvelope(path)
 		if err != nil {
 			return err
 		}
-		env.KDF = KDFMetadata{
-			Algorithm: kdfAlgArgon2id,
-			Salt:      base64.StdEncoding.EncodeToString(salt),
-			Time:      params.Time,
-			Memory:    params.Memory,
-			Threads:   params.Threads,
+		plaintext, err := env.Payload.open(oldDEK, aadPayload)
+		if err != nil {
+			return fmt.Errorf("decrypt vault payload: %w", err)
 		}
-		env.WrappedDEK = CipherBlob{
-			Nonce:      base64.StdEncoding.EncodeToString(nonce),
-			Ciphertext: base64.StdEncoding.EncodeToString(ciphertext),
+		defer crypto.Zero(plaintext)
+
+		env.Payload, err = seal(newDEK, plaintext, aadPayload)
+		if err != nil {
+			return err
 		}
+		env.KDF = kdf
+		env.WrappedDEK = wrappedDEK
 		return writeEnvelopeAtomic(path, env)
 	})
 }
