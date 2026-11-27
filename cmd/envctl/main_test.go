@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,20 @@ func buildCLI(t *testing.T, dir string) string {
 		t.Fatalf("go build: %v\n%s", err, out)
 	}
 	return bin
+}
+
+// daemonPID finds the daemon listening on socketPath by its command line.
+func daemonPID(t *testing.T, socketPath string) string {
+	t.Helper()
+	cmdlines, _ := filepath.Glob("/proc/[0-9]*/cmdline")
+	for _, path := range cmdlines {
+		data, err := os.ReadFile(path)
+		if err == nil && strings.Contains(string(data), "__daemon\x00--socket\x00"+socketPath+"\x00") {
+			return filepath.Base(filepath.Dir(path))
+		}
+	}
+	t.Fatalf("no envctl daemon found for %s", socketPath)
+	return ""
 }
 
 func TestCLIEndToEnd(t *testing.T) {
@@ -99,6 +114,16 @@ func TestCLIEndToEnd(t *testing.T) {
 	}
 	if out != "sk-or-live-999|Bearer sk-or-live-999|hello" {
 		t.Fatalf("unexpected run output: %q", out)
+	}
+
+	// The daemon holds the key, so it marks itself non-dumpable. That shows as
+	// /proc/<pid>/environ being unreadable to this user, which Yama's ptrace
+	// restrictions do not cause on their own. Root can always read it.
+	if os.Getuid() != 0 {
+		pid := daemonPID(t, filepath.Join(sockDir, "a.sock"))
+		if _, err := os.Open(filepath.Join("/proc", pid, "environ")); !errors.Is(err, os.ErrPermission) {
+			t.Fatalf("expected the daemon to be non-dumpable, got %v", err)
+		}
 	}
 
 	// --help prints usage and succeeds instead of being parsed as a flag error or a key.

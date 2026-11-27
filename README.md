@@ -27,7 +27,7 @@ In CI or production, real environment variables already set on the host take pre
 `envctl` ships as a single Go binary (CLI plus background daemon) and a zero-dependency TypeScript SDK under `sdk/`.
 
 - **Encrypted at rest.** Secrets live in `~/.local/share/envctl/vault.enc` (`0600`). Your master password derives a key with Argon2id that wraps a random 32-byte AES-256-GCM data encryption key (DEK). Nothing decrypted is written to disk.
-- **In-memory unlock window.** Unlocking starts a detached daemon on a `0600` Unix domain socket verified with `SO_PEERCRED`. The daemon holds only the 32-byte DEK in RAM, decrypts secrets on demand, zeroes the key, and exits when locked, when a fixed TTL expires, or when a watched shell session ends.
+- **In-memory unlock window.** Unlocking starts a detached daemon on a `0600` Unix domain socket verified with `SO_PEERCRED`. The daemon keeps only the 32-byte DEK between requests and decrypts secrets on demand. Other processes running as your user cannot read its memory, and it writes no core dump. It zeroes the key and exits when locked, when a fixed TTL expires, or when a watched shell session ends.
 - **Thin TypeScript SDK.** `@nickawrist/envctl` parses `.env`, scans `process.env` for placeholders, and batches lookups over the Unix socket. It never reads `vault.enc` or handles passwords.
 
 ## Documentation
