@@ -29,6 +29,80 @@ EMPTY=
 	}
 }
 
+func TestParseMultilineQuotesAndComments(t *testing.T) {
+	input := "\ufeffFIRST=1\r\n" +
+		"PEM=\"-----BEGIN KEY-----\r\nabc==\r\n-----END KEY-----\" # trailing\r\n" +
+		"JSON='{\n  \"a\": 1\n}'\n" +
+		"EMPTY_WITH_COMMENT= # %ENVCTL-OLD_KEY%\n" +
+		"COLOR=#fff\n" +
+		"UNTERMINATED=\"oops\n" +
+		"AFTER=still parsed\n"
+	parsed := Parse(input)
+	want := map[string]string{
+		"FIRST":              "1",
+		"PEM":                "-----BEGIN KEY-----\nabc==\n-----END KEY-----",
+		"JSON":               "{\n  \"a\": 1\n}",
+		"EMPTY_WITH_COMMENT": "",
+		"COLOR":              "#fff",
+		"UNTERMINATED":       "oops",
+		"AFTER":              "still parsed",
+	}
+	if !reflect.DeepEqual(parsed.Values, want) {
+		t.Fatalf("Parse mismatch:\ngot:  %#v\nwant: %#v", parsed.Values, want)
+	}
+}
+
+func TestHasMalformedPlaceholder(t *testing.T) {
+	for value, want := range map[string]bool{
+		"%ENVCTL-API_KEY%":              false,
+		"Bearer %ENVCTL-API_KEY%":       false,
+		"plain":                         false,
+		"%ENVCTL-API_KEY":               true,
+		"%envctl-api_key%":              true,
+		"%ENVCTL-A% and %ENVCTL-B":      true,
+		"%ENVCTL_API_KEY%":              true,
+		"100%ENVCTL":                    true,
+		"postgres://u:%ENVCTL-P%@h/%db": false,
+	} {
+		if got := HasMalformedPlaceholder(value); got != want {
+			t.Errorf("HasMalformedPlaceholder(%q) = %v, want %v", value, got, want)
+		}
+	}
+}
+
+// Placeholders that arrive through the environment (systemd EnvironmentFile,
+// Docker Compose) are resolved the same way the SDK resolves them.
+func TestResolvePlaceholdersFromExistingEnv(t *testing.T) {
+	parsed := Parse("API_KEY=%ENVCTL-FILE_KEY%\nPORT=3000\n")
+	existing := map[string]string{
+		"API_KEY": "%ENVCTL-ENV_KEY%",
+		"TOKEN":   "Bearer %ENVCTL-TOKEN%",
+		"HOME":    "/home/me",
+	}
+	secrets := map[string]string{"FILE_KEY": "from-file", "ENV_KEY": "from-env", "TOKEN": "t0k"}
+	fetch := func(keys []string) (map[string]string, []string, error) {
+		return secrets, nil, nil
+	}
+
+	resolved, _, err := Resolve(parsed, existing, false, fetch)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := map[string]string{"API_KEY": "from-env", "TOKEN": "Bearer t0k", "PORT": "3000"}
+	if !reflect.DeepEqual(resolved, want) {
+		t.Fatalf("without override:\ngot:  %#v\nwant: %#v", resolved, want)
+	}
+
+	resolved, _, err = Resolve(parsed, existing, true, fetch)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want["API_KEY"] = "from-file"
+	if !reflect.DeepEqual(resolved, want) {
+		t.Fatalf("with override:\ngot:  %#v\nwant: %#v", resolved, want)
+	}
+}
+
 func TestResolvePrecedenceAndInlineSubstitution(t *testing.T) {
 	parsed := Parse(`
 API_KEY=%ENVCTL-OPENROUTER_KEY%

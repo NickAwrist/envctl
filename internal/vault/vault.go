@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"syscall"
 	"time"
 
 	"github.com/NickAwrist/envctl/internal/crypto"
@@ -205,7 +206,23 @@ func ReadPayload(path string, dek []byte) (*Payload, error) {
 	return &payload, nil
 }
 
-func WritePayload(path string, dek []byte, payload *Payload) error {
+// UpdatePayload applies mutate to the decrypted payload and writes the result
+// back, holding the vault lock so no other process can change the file between
+// the read and the write. If mutate returns an error nothing is written.
+func UpdatePayload(path string, dek []byte, mutate func(*Payload) error) error {
+	return withLock(path, func() error {
+		payload, err := ReadPayload(path, dek)
+		if err != nil {
+			return err
+		}
+		if err := mutate(payload); err != nil {
+			return err
+		}
+		return writePayload(path, dek, payload)
+	})
+}
+
+func writePayload(path string, dek []byte, payload *Payload) error {
 	env, err := readEnvelope(path)
 	if err != nil {
 		return err
@@ -244,10 +261,6 @@ func ChangePasswordWithParams(path string, oldPassword, newPassword []byte, para
 	}
 	defer crypto.Zero(dek)
 
-	env, err := readEnvelope(path)
-	if err != nil {
-		return err
-	}
 	salt, err := crypto.RandomBytes(crypto.SaltSize)
 	if err != nil {
 		return err
@@ -260,18 +273,43 @@ func ChangePasswordWithParams(path string, oldPassword, newPassword []byte, para
 		return err
 	}
 
-	env.KDF = KDFMetadata{
-		Algorithm: kdfAlgArgon2id,
-		Salt:      base64.StdEncoding.EncodeToString(salt),
-		Time:      params.Time,
-		Memory:    params.Memory,
-		Threads:   params.Threads,
+	// Key derivation is slow, so only the envelope rewrite happens under the
+	// lock. It starts from the envelope as it is now, which keeps any payload
+	// written while the keys were being derived.
+	return withLock(path, func() error {
+		env, err := readEnvelope(path)
+		if err != nil {
+			return err
+		}
+		env.KDF = KDFMetadata{
+			Algorithm: kdfAlgArgon2id,
+			Salt:      base64.StdEncoding.EncodeToString(salt),
+			Time:      params.Time,
+			Memory:    params.Memory,
+			Threads:   params.Threads,
+		}
+		env.WrappedDEK = CipherBlob{
+			Nonce:      base64.StdEncoding.EncodeToString(nonce),
+			Ciphertext: base64.StdEncoding.EncodeToString(ciphertext),
+		}
+		return writeEnvelopeAtomic(path, env)
+	})
+}
+
+// withLock runs fn while holding an exclusive lock on the vault, serializing
+// read-modify-write cycles across processes (the daemon and 'envctl passwd').
+// The lock lives on a sibling file because the vault itself is replaced by
+// rename on every write.
+func withLock(path string, fn func() error) error {
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open vault lock: %w", err)
 	}
-	env.WrappedDEK = CipherBlob{
-		Nonce:      base64.StdEncoding.EncodeToString(nonce),
-		Ciphertext: base64.StdEncoding.EncodeToString(ciphertext),
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("lock vault: %w", err)
 	}
-	return writeEnvelopeAtomic(path, env)
+	return fn()
 }
 
 func readEnvelope(path string) (Envelope, error) {

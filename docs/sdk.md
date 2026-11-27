@@ -8,10 +8,10 @@ The `@nickawrist/envctl` package lives in `sdk/`, targets Node 20+ (and Bun), sh
 pnpm add @nickawrist/envctl
 ```
 
-Or pack a local tarball from this repository before publishing:
+The package is not on the npm registry yet. Until it is, pack a local tarball from this repository and install that:
 
 ```sh
-cd sdk && pnpm run build && npm pack
+cd sdk && pnpm install && pnpm run build && npm pack
 ```
 
 ## Placeholder syntax
@@ -24,13 +24,15 @@ DATABASE_URL=postgres://app:%ENVCTL-LOCAL_DB_PASS%@localhost:5432/mydb
 PORT=3000
 ```
 
-Inline interpolation and multiple placeholders in one value are supported.
+Inline interpolation and multiple placeholders in one value are supported. Quoted values may span several lines, and text after ` #` is a comment.
 
 ## API
 
 ### `resolveEnv(options?)`
 
 Reads `.env` (if present) and scans `baseEnv` (default `process.env`) for `%ENVCTL-...%` placeholders, fetches all referenced keys in one daemon call, and returns the resolved key-value map without mutating `process.env`.
+
+The map holds the effective value of every variable named in `.env`, plus every `baseEnv` variable that contained a placeholder. When a variable is already set in `baseEnv` (for example by CI), the map holds that value, so the code below works the same on a laptop and in production.
 
 ```ts
 import { resolveEnv } from "@nickawrist/envctl";
@@ -62,7 +64,7 @@ Options shared by `resolveEnv` and `loadEnv`:
 | `socketPath` | `string` | Auto-detected | Override the daemon Unix socket path |
 | `timeoutMs` | `number` | `5000` | Socket request timeout in milliseconds |
 
-`loadEnv` also accepts `target` (default `process.env`) to populate a custom object instead of `process.env`.
+`loadEnv` also accepts `target` (default `process.env`) to populate a custom object instead of `process.env`. With a custom `target`, precedence is checked against that object. Pass `baseEnv: process.env` as well if real environment variables should still win.
 
 ### Preload hook for ESM
 
@@ -72,6 +74,8 @@ Static `import` statements run before top-level code in your entry file. To reso
 node --import @nickawrist/envctl/register dist/index.js
 tsx --import @nickawrist/envctl/register src/index.ts
 ```
+
+Use the `--import` flag. Writing `import "@nickawrist/envctl/register"` at the top of your entry file does not work on Node: the hook resolves secrets asynchronously, and Node evaluates the other imports of that file before it finishes. If you cannot pass the flag, call `await loadEnv()` first and load the rest of the application with a dynamic `import()`.
 
 ### Direct lookups and status
 
@@ -91,6 +95,8 @@ Pure parsing helpers (`parseDotenv`, `extractPlaceholders`, `hasPlaceholder`, `r
 2. If an environment variable in `process.env` does contain `%ENVCTL-...%` (for example from Bun's automatic `.env` loader or a systemd `EnvironmentFile`), `loadEnv()` resolves it via the daemon even when no `.env` file is on disk.
 3. If zero unresolved placeholders remain after precedence checks, the SDK skips connecting to the daemon completely. Production deployments with real environment variables do not need `envctl` installed.
 
+Rule 2 applies to every variable in the environment, not only those named in `.env`. Any variable whose value contains `%ENVCTL-<KEY>%` makes the SDK contact the daemon, so keep that text out of unrelated variables in environments where `envctl` is not running.
+
 ## Error handling
 
 All errors extend `EnvctlError` (with a `.code` string property):
@@ -98,3 +104,4 @@ All errors extend `EnvctlError` (with a `.code` string property):
 - `EnvctlLockedError` (`code: "LOCKED"`) when the daemon is not running or the vault is locked
 - `EnvctlMissingKeysError` (`code: "MISSING_KEYS"`, `.missingKeys: readonly string[]`) when one or more referenced secrets do not exist in the vault
 - `EnvctlProtocolError` on socket framing, ownership, or protocol version mismatches
+- `EnvctlError` with `code: "ENV_FILE"` when the `.env` file cannot be read (a missing file is only an error when `optional` is `false`)

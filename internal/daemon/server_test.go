@@ -18,8 +18,7 @@ var testKDF = crypto.KDFParams{Time: 1, Memory: 8 * 1024, Threads: 1}
 
 func startTestServer(t *testing.T) (*Server, *Client, string) {
 	t.Helper()
-	dir := t.TempDir()
-	vaultPath := filepath.Join(dir, "vault.enc")
+	vaultPath := filepath.Join(t.TempDir(), "data", "vault.enc")
 
 	sockDir, err := os.MkdirTemp("/tmp", "envctl-test-*")
 	if err != nil {
@@ -176,4 +175,45 @@ func TestDaemonUntilLockAndDelete(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("expected daemon to stop after Lock()")
+}
+
+// A mistyped ENVCTL_SOCKET must never cost the user the file it points at.
+func TestStartRefusesToReplaceNonSocketFile(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "envctl-test-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	precious := filepath.Join(dir, "vault.enc")
+	if err := os.WriteFile(precious, []byte("do not delete"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	srv := NewServer(precious, filepath.Join(dir, "unused.enc"))
+	if err := srv.Start(); err == nil {
+		srv.Shutdown()
+		t.Fatalf("expected Start to refuse a socket path that is a regular file")
+	}
+	if data, err := os.ReadFile(precious); err != nil || string(data) != "do not delete" {
+		t.Fatalf("file at socket path was modified: %q, %v", data, err)
+	}
+}
+
+func TestDaemonRejectsClientExpectingAnotherVault(t *testing.T) {
+	srv, client, _ := startTestServer(t)
+	if _, err := client.Unlock("test-pass", config.UnlockModeUntilLock, 0, 0); err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+
+	client.VaultPath = filepath.Join(t.TempDir(), "other", "vault.enc")
+	err := client.Set("K", "V", "")
+	var remoteErr *RemoteError
+	if !errors.As(err, &remoteErr) || remoteErr.Code != protocol.ErrCodeInvalidRequest {
+		t.Fatalf("expected INVALID_REQUEST for a different vault, got %v", err)
+	}
+
+	client.VaultPath = srv.vaultPath
+	if err := client.Set("K", "V", ""); err != nil {
+		t.Fatalf("Set with the served vault path: %v", err)
+	}
 }

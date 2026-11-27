@@ -17,9 +17,10 @@ func Parse(content string) Parsed {
 	result := Parsed{
 		Values: make(map[string]string),
 	}
-	lines := strings.Split(content, "\n")
-	for _, rawLine := range lines {
-		line := strings.TrimRight(rawLine, "\r")
+	rest := strings.ReplaceAll(strings.TrimPrefix(content, "\ufeff"), "\r\n", "\n")
+	for rest != "" {
+		var line string
+		line, rest, _ = strings.Cut(rest, "\n")
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
@@ -35,7 +36,16 @@ func Parse(content string) Parsed {
 		if key == "" {
 			continue
 		}
-		rawVal := strings.TrimSpace(trimmed[eq+1:])
+		rawVal := trimmed[eq+1:]
+
+		// A quoted value may span lines. Without a closing quote it ends on this line.
+		if opening := strings.TrimLeft(rawVal, " \t"); closingQuote(opening) == unterminated {
+			tail := strings.TrimLeft(line[strings.IndexByte(line, '=')+1:], " \t") + "\n" + rest
+			if end := closingQuote(tail); end >= 0 {
+				rawVal = tail[:end+1]
+				_, rest, _ = strings.Cut(tail[end+1:], "\n")
+			}
+		}
 		val := parseValue(rawVal)
 
 		if _, exists := result.Values[key]; !exists {
@@ -46,18 +56,43 @@ func Parse(content string) Parsed {
 	return result
 }
 
+const (
+	notQuoted    = -1
+	unterminated = -2
+)
+
+// closingQuote returns the index of the quote that closes a value starting with
+// ' or ", notQuoted if the value is not quoted, or unterminated.
+func closingQuote(val string) int {
+	if val == "" || (val[0] != '"' && val[0] != '\'') {
+		return notQuoted
+	}
+	for i := 1; i < len(val); i++ {
+		switch {
+		case val[0] == '"' && val[i] == '\\':
+			i++
+		case val[i] == val[0]:
+			return i
+		}
+	}
+	return unterminated
+}
+
+// parseValue parses the text after '=', which keeps its leading whitespace so
+// that a '#' right after it ("KEY= # note") is recognized as a comment.
 func parseValue(raw string) string {
-	if len(raw) == 0 {
+	val := strings.TrimSpace(raw)
+	if val == "" {
 		return ""
 	}
-	if raw[0] == '"' {
-		return parseDoubleQuoted(raw[1:])
+	if val[0] == '"' {
+		return parseDoubleQuoted(val[1:])
 	}
-	if raw[0] == '\'' {
-		if end := strings.IndexByte(raw[1:], '\''); end >= 0 {
-			return raw[1 : 1+end]
+	if val[0] == '\'' {
+		if end := strings.IndexByte(val[1:], '\''); end >= 0 {
+			return val[1 : 1+end]
 		}
-		return raw[1:]
+		return val[1:]
 	}
 	// Strip inline comment only when '#' is preceded by whitespace.
 	for i := 0; i < len(raw); i++ {
@@ -65,7 +100,7 @@ func parseValue(raw string) string {
 			return strings.TrimSpace(raw[:i])
 		}
 	}
-	return raw
+	return val
 }
 
 func parseDoubleQuoted(rest string) string {
@@ -121,6 +156,14 @@ func HasPlaceholder(value string) bool {
 	return placeholderRe.MatchString(value)
 }
 
+// HasMalformedPlaceholder reports whether value contains text that looks like
+// a placeholder but would be passed through unresolved, such as "%ENVCTL-KEY"
+// without the closing '%' or a lowercase "%envctl-key%".
+func HasMalformedPlaceholder(value string) bool {
+	rest := placeholderRe.ReplaceAllString(value, "")
+	return strings.Contains(strings.ToUpper(rest), "%ENVCTL")
+}
+
 func ReplacePlaceholders(value string, secrets map[string]string) (string, []string) {
 	var missing []string
 	seenMissing := make(map[string]struct{})
@@ -145,20 +188,31 @@ func ReplacePlaceholders(value string, secrets map[string]string) (string, []str
 type FetchFunc func(keys []string) (values map[string]string, missing []string, err error)
 
 // Resolve resolves parsed .env entries against existingEnv and fetches any
-// referenced %ENVCTL-...% secrets in one batch.
+// referenced %ENVCTL-...% secrets in one batch. Placeholders already present in
+// existingEnv (for example from a systemd EnvironmentFile) are resolved too.
+// The returned map holds only the variables to set on top of existingEnv.
 func Resolve(parsed Parsed, existingEnv map[string]string, override bool, fetch FetchFunc) (map[string]string, []string, error) {
-	resolved := make(map[string]string, len(parsed.Values))
-	neededKeysSet := make(map[string]struct{})
-	activeKeys := make([]string, 0, len(parsed.Order))
-
+	pending := make(map[string]string, len(parsed.Values))
 	for _, envKey := range parsed.Order {
-		val := parsed.Values[envKey]
 		if !override {
 			if existing, ok := existingEnv[envKey]; ok && !HasPlaceholder(existing) {
 				continue
 			}
 		}
-		activeKeys = append(activeKeys, envKey)
+		pending[envKey] = parsed.Values[envKey]
+	}
+	for envKey, existing := range existingEnv {
+		if !HasPlaceholder(existing) {
+			continue
+		}
+		if _, fromFile := pending[envKey]; fromFile && override {
+			continue
+		}
+		pending[envKey] = existing
+	}
+
+	neededKeysSet := make(map[string]struct{})
+	for _, val := range pending {
 		for _, secretName := range ExtractPlaceholders(val) {
 			neededKeysSet[secretName] = struct{}{}
 		}
@@ -184,18 +238,14 @@ func Resolve(parsed Parsed, existingEnv map[string]string, override bool, fetch 
 		}
 	}
 
-	for _, envKey := range activeKeys {
-		val := parsed.Values[envKey]
-		if len(secrets) > 0 && HasPlaceholder(val) {
-			replaced, missing := ReplacePlaceholders(val, secrets)
-			if len(missing) > 0 {
-				sort.Strings(missing)
-				return nil, missing, nil
-			}
-			resolved[envKey] = replaced
-		} else {
-			resolved[envKey] = val
+	resolved := make(map[string]string, len(pending))
+	for envKey, val := range pending {
+		replaced, missing := ReplacePlaceholders(val, secrets)
+		if len(missing) > 0 {
+			sort.Strings(missing)
+			return nil, missing, nil
 		}
+		resolved[envKey] = replaced
 	}
 	return resolved, nil, nil
 }

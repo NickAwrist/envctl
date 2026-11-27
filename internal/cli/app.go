@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 
 	"github.com/NickAwrist/envctl/internal/output"
@@ -9,13 +10,18 @@ import (
 
 const Version = "0.1.0"
 
-// ExitCodeError signals that a child command exited with a specific code.
+// ExitCodeError makes envctl exit with a specific code after reporting Err.
 type ExitCodeError struct {
 	Code int
+	Err  error
 }
 
 func (e *ExitCodeError) Error() string {
-	return fmt.Sprintf("exit status %d", e.Code)
+	return e.Err.Error()
+}
+
+func (e *ExitCodeError) Unwrap() error {
+	return e.Err
 }
 
 // App wires together CLI subcommands and centralized output formatting.
@@ -31,11 +37,14 @@ func NewApp(out *output.Printer) *App {
 func Run(args []string) int {
 	app := NewApp(output.New())
 	if err := app.Execute(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		app.out.Error("%v", explainLocked(err))
 		var exitErr *ExitCodeError
 		if errors.As(err, &exitErr) {
 			return exitErr.Code
 		}
-		app.out.Error("%v", err)
 		return 1
 	}
 	return 0
@@ -79,6 +88,9 @@ func (a *App) Execute(args []string) error {
 		a.out.Info("envctl %s", a.out.Dim(Version))
 		return nil
 	case "help", "--help", "-h":
+		if cmd == "help" && len(rest) > 0 {
+			return a.Execute([]string{rest[0], "--help"})
+		}
 		a.printUsage()
 		return nil
 	default:
@@ -112,6 +124,8 @@ func (a *App) printUsage() {
 	for _, c := range commands {
 		a.out.Info("  %s%s  %s", a.out.Cyan(c[0]), padSpaces(9-len(c[0])), c[1])
 	}
+	a.out.Line("")
+	a.out.Info("Run 'envctl <command> --help' for a command's arguments and flags.")
 }
 
 func padSpaces(n int) string {

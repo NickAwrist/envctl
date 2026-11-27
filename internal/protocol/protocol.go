@@ -35,8 +35,10 @@ const (
 )
 
 type Request struct {
-	V           int               `json:"v"`
-	Op          string            `json:"op"`
+	V  int    `json:"v"`
+	Op string `json:"op"`
+	// Vault, when set, is the vault file the client expects the daemon to serve.
+	Vault       string            `json:"vault,omitempty"`
 	Password    string            `json:"password,omitempty"`
 	Mode        config.UnlockMode `json:"mode,omitempty"`
 	TTLMs       int64             `json:"ttl_ms,omitempty"`

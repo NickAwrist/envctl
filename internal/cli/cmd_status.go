@@ -9,11 +9,19 @@ import (
 	"github.com/NickAwrist/envctl/internal/daemon"
 	"github.com/NickAwrist/envctl/internal/output"
 	"github.com/NickAwrist/envctl/internal/paths"
+	"github.com/NickAwrist/envctl/internal/vault"
 )
 
 func (a *App) cmdStatus(args []string) error {
-	if len(args) > 0 {
-		return errors.New("status takes no arguments")
+	fs := a.newCommand("status",
+		"envctl status",
+		"Show whether the vault is unlocked, the active unlock mode and expiry, and the\n"+
+			"vault and socket paths.")
+	if err := fs.parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fs.usageError()
 	}
 	vaultPath, err := paths.VaultFile()
 	if err != nil {
@@ -33,8 +41,12 @@ func (a *App) cmdStatus(args []string) error {
 	status, err := client.Status()
 	if err != nil {
 		if errors.Is(err, daemon.ErrDaemonUnavailable) {
+			state := a.out.Red("locked")
+			if !vault.Exists(vaultPath) {
+				state = a.out.Yellow("no vault (run 'envctl init')")
+			}
 			a.out.KeyValues([]output.KV{
-				{Key: "Status", Value: a.out.Red("locked")},
+				{Key: "Status", Value: state},
 				{Key: "Default", Value: fmt.Sprintf("%s (ttl: %s)", cfg.UnlockMode, cfg.UnlockTTL)},
 				{Key: "Vault", Value: vaultPath},
 				{Key: "Socket", Value: sockPath},

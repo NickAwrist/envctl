@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 
@@ -13,11 +12,16 @@ import (
 )
 
 func (a *App) cmdPasswd(args []string) error {
-	fs := flag.NewFlagSet("passwd", flag.ContinueOnError)
-	oldFile := fs.String("old-password-file", "", "Read current master password from file")
-	newFile := fs.String("new-password-file", "", "Read new master password from file")
-	if err := fs.Parse(args); err != nil {
+	fs := a.newCommand("passwd",
+		"envctl passwd [--old-password-file <path>] [--new-password-file <path>]",
+		"Change the master password. Stored secrets are not re-encrypted.")
+	oldFile := fs.String("old-password-file", "", "Read the current master password from the file at `path`")
+	newFile := fs.String("new-password-file", "", "Read the new master password from the file at `path`")
+	if err := fs.parse(args); err != nil {
 		return err
+	}
+	if fs.NArg() > 0 {
+		return fs.usageError()
 	}
 
 	vaultPath, err := paths.VaultFile()

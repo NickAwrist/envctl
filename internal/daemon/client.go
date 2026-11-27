@@ -31,7 +31,9 @@ func (e *RemoteError) Error() string {
 
 type Client struct {
 	SocketPath string
-	Timeout    time.Duration
+	// VaultPath, when set, makes the daemon reject requests unless it serves this vault.
+	VaultPath string
+	Timeout   time.Duration
 }
 
 func NewClient(socketPath string) *Client {
@@ -70,6 +72,7 @@ func (c *Client) Do(req protocol.Request) (protocol.Response, error) {
 	}
 
 	req.V = protocol.Version
+	req.Vault = c.VaultPath
 	conn, err := net.DialTimeout("unix", c.SocketPath, c.Timeout)
 	if err != nil {
 		return protocol.Response{}, ErrDaemonUnavailable
@@ -163,6 +166,10 @@ func EnsureDaemonRunning(socketPath, vaultPath string) error {
 	client := NewClient(socketPath)
 	if _, err := client.Status(); err == nil {
 		return nil
+	}
+	// The detached daemon cannot report why it failed to start, so check here.
+	if err := checkSocketPath(socketPath); err != nil {
+		return err
 	}
 
 	exe, err := os.Executable()

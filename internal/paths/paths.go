@@ -1,6 +1,7 @@
 package paths
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -67,12 +68,25 @@ func SocketPath() string {
 	return filepath.Join("/tmp", fmt.Sprintf("envctl-%d", os.Getuid()), "agent.sock")
 }
 
+// EnsurePrivateDir creates dir with 0700 permissions if it does not exist. An
+// existing directory is never modified: it must already be private, so that
+// pointing envctl at a shared directory fails instead of locking others out.
 func EnsurePrivateDir(dir string) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create directory %s: %w", dir, err)
+	info, err := os.Stat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("create directory %s: %w", dir, err)
+		}
+		return nil
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return fmt.Errorf("chmod directory %s: %w", dir, err)
+	if err != nil {
+		return fmt.Errorf("stat directory %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", dir)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		return fmt.Errorf("directory %s is accessible to other users (mode %04o); use a directory with mode 0700", dir, perm)
 	}
 	return nil
 }
