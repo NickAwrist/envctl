@@ -14,7 +14,8 @@ import (
 func (a *App) cmdPasswd(args []string) error {
 	fs := a.newCommand("passwd",
 		"envctl passwd [--old-password-file <path>] [--new-password-file <path>]",
-		"Change the master password. Stored secrets are not re-encrypted.")
+		"Change the master password and re-encrypt the secrets with a new data key.\n"+
+			"The vault is locked afterwards.")
 	oldFile := fs.String("old-password-file", "", "Read the current master password from the file at `path`")
 	newFile := fs.String("new-password-file", "", "Read the new master password from the file at `path`")
 	if err := fs.parse(args); err != nil {
@@ -29,7 +30,7 @@ func (a *App) cmdPasswd(args []string) error {
 		return err
 	}
 	if !vault.Exists(vaultPath) {
-		return fmt.Errorf("vault not found at %s", vaultPath)
+		return errNoVault(vaultPath)
 	}
 
 	oldPw, err := a.readSecretInput("Current master password: ", *oldFile, false)
@@ -55,9 +56,17 @@ func (a *App) cmdPasswd(args []string) error {
 		}
 	}
 
+	client, err := newClient()
+	if err != nil {
+		return err
+	}
 	if err := vault.ChangePassword(vaultPath, oldPw, newPw); err != nil {
 		return err
 	}
-	a.out.Success("Master password updated.")
+	// A running daemon still holds the previous data key, which no longer opens the vault.
+	if err := client.Lock(); err != nil {
+		return fmt.Errorf("master password updated, but locking the running daemon failed (run 'envctl lock'): %w", err)
+	}
+	a.out.Success("Master password updated. The vault is locked.")
 	return nil
 }

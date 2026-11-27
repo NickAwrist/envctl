@@ -16,7 +16,7 @@ All files and sockets live inside `0700` directories with `0600` file permission
 2. **Key wrapping.** `envctl init` generates a random 32-byte Data Encryption Key (DEK) and encrypts it with the KEK using `AES-256-GCM`, a 12-byte random nonce, and associated data `envctl:v1:dek`.
 3. **Payload encryption.** The entire secrets JSON payload is encrypted with the DEK using `AES-256-GCM`, a fresh 12-byte nonce on every write, and associated data `envctl:v1:payload`.
 
-When unlocking, deriving the KEK and decrypting the wrapped DEK verifies the password via the GCM authentication tag and yields the DEK in memory. Rotating the master password (`envctl passwd`) re-wraps the DEK with a new salt and KEK without re-encrypting the payload.
+When unlocking, deriving the KEK and decrypting the wrapped DEK verifies the password via the GCM authentication tag and yields the DEK in memory. Rotating the master password (`envctl passwd`) generates a new DEK, re-encrypts the payload with it, and wraps it with a new salt and KEK. The old password and the old DEK stop working, so `envctl passwd` also locks a running daemon.
 
 Every write to `vault.enc` goes to a `0600` temporary file in the same directory, calls `fsync`, and atomically replaces `vault.enc` via `rename`. Each read-modify-write cycle holds an exclusive `flock` on `vault.enc.lock`, so a secret written by the daemon and a password change made by `envctl passwd` cannot overwrite each other.
 
